@@ -1,0 +1,5 @@
+# Local upstream reference material (including nested repositories).
+/upstream/
+
+# Local IDE configuration.
+/.idea/
