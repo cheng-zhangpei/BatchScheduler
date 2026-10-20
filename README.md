@@ -2,17 +2,28 @@
 
 参考 Kubernetes 调度器结构，从零实现以 Group 为单位的调度核心。每次只推进一个小目标。
 
-当前已建立 PodGroup CR、Pod 成员视图及关联。`src/workqueue/` 新增弹性调度单元 `Unit` 接口，三个基础队列改为按单元存取；另有 `FastRetry` 实例，为严格准入、优先消费保留通道。单元具体实现、快速重试准入和所有队列的流转、优先级消费均尚未实现。main 在初始同步后调用空入口 `Select(view)`，后续事件未接入；operator、调度算法及绑定未实现。
+**整体调度流程尚未打通。当前正在开发 Center，已接通观察和评估 worker；动作执行、实际调度、Assume / Forget 和 binding cycle 均未实现。** 架构边界、模块进度、测试范围与后续安排见[项目进度表](progress.md)。
 
-`src/workqueue/transition.go` 定义统一迁移请求和 `WorkQueue.Transition` 入口，暂不执行迁移，调用会明确返回“尚未实现”错误。源位置校验、重复请求和跨队列一致性要求已记在注释中。
+当前已建立 PodGroup CR、Pod 成员视图及关联。`src/workqueue/` 保留 `Unit` 接口及一个默认实现，同一个单元从组装走向冻结；四个队列均以 Unit 存取。main 在初始同步后调用 `Select(SelectRequest{View: view, Nodes: nodes})`，查询 Pod 归属、复用或创建单元，并登记组内关系。默认策略为 Atomic 整组齐备后进 Active，Partial 按单 Pod 入 Active，已确认的内部异常进 Fail，绑定结果待确定时不入队。Select 直接首次入队；队列间迁移由 Transition 管理，已实现 Fail → Retry 及显式提示驱动的 Retry → Active。
+
+`src/workqueue/transition.go` 已实现 Fail → Retry：校验失败分类、恢复确认、当前归属及成员状态，保存结构化重试计划；相同请求重放不会重置退避时间。`retry_policy.go` 注释列出可重试类型、不能直接重试的情况，以及Retry → Active 的事件/时间门槛。`retry_wakeup.go` 已实现显式提示驱动的激活及状态复查，持续事件和定时器尚未接入，FastRetry 不参与本阶段迁移。缓冲区确认的失败经 Select 回送，不走 Active → Fail。
+
+`src/staging/` 已实现 Center 的接收登记、观察更新和评估。Accept 保存 Unit 记录、同组索引及成员归属；Observe 从 Store 重读当前事实；Group Key 去重队列连接独立评估 worker，按组产出等待、调度、恢复、回送及释放建议。main 已接上 Pod/PodGroup informer → Observe → 评估 worker，当前仅接收决策，尚未实现 Apply / Report / Release 或实际队列交接。
+
+首次入队统一通过 `Select(SelectRequest)`，只处理有 PodGroup 归属的成员。Atomic 的 Pod 来源提升为组级，Partial 保留 Pod 粒度；`StagingLookup` 查询暂存归属，避免重复组装。Active.Pop → Accept 消费交接、持续事件到队列的反馈、资源缓存与 Assume / Forget、调度算法、绑定、operator 尚未实现。compaction、FastRetry 严格准入和 Agent 接入继续后置。
+
+2026-10-20 收工：下一步逐个讨论并实现 Center 的 Apply、Report、Release，先用模拟执行器验证闭环。最近 `go test ./src/... -count=1` 全部通过，尚未测试真实集群。
 
 ```text
 go.mod                         Go 模块，依赖 client-go 基础库
 src/
   cmd/batchscheduler/main.go    配置与启动入口
-  informer/informer.go          Pod/Node 观察、缓存同步、lister
+  informer/                    Pod/Node/PodGroup 观察、缓存同步、事件回调
   apis/scheduling/v1alpha1/     PodGroup 的 Go 数据定义
   group/view.go                Pod 成员关联、索引和组视图
+  group/state.go               组与 Pod 的内部状态定义
+  workqueue/                   Unit、四个队列、Select / Policy、Transition 及测试
+  staging/                     Center 接收、观察、评估及去重 worker；执行反馈待实现
 config/crd/                    PodGroup CRD
 upstream/                      上游源码阅读材料
 ```
@@ -46,4 +57,4 @@ kubectl apply -f config/crd/scheduling.batchscheduler.io_podgroups.yaml
 3. `Start` 与 `WaitForCacheSync` 分别负责什么。
 4. lister 为什么从缓存读取，为什么返回对象不能直接修改。
 
-组关系的阅读入口见 [PodGroup 与 Pod 视图](docs/podgroup-view.md)。本步先不注册业务事件处理器；关联索引由 informer 的 Indexer 自动维护。后续再讨论组状态如何进入工作队列。informer 对象缓存与未来用于资源记账的调度缓存是不同职责。
+组关系的阅读入口见 [PodGroup 与 Pod 视图](docs/podgroup-view.md)。Select 已接通初始视图到工作队列的首次入队；持续业务事件处理器尚未注册。关联索引由 informer 的 Indexer 自动维护。informer 对象缓存与未来用于资源记账的调度缓存是不同职责。

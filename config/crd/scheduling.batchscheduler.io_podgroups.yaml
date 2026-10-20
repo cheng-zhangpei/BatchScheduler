@@ -35,3 +35,9 @@ spec:
                   type: integer
                   format: int32
                   minimum: 1
+                submitMode:
+                  type: string
+                  default: AllTogether
+                  enum:
+                    - AllTogether
+                    - AllowPartial

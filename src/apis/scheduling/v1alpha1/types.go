@@ -25,4 +25,6 @@ type PodGroup struct {
 type PodGroupSpec struct {
 	// Members 是期望的成员总数，必须大于零；暂不引入独立的 minMember。
 	Members int32 `json:"members"`
+	// SubmitMode 声明整组提交或允许部分提交，缺省按 AllTogether 解释。
+	SubmitMode string `json:"submitMode,omitempty"`
 }

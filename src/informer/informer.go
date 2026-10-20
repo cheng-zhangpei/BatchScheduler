@@ -18,13 +18,15 @@ import (
 // Informers 共享一个 factory，后续模块通过 lister 读取其缓存。
 // lister 返回的是共享对象，调用方不得直接修改。
 type Informers struct {
-	factory      informers.SharedInformerFactory
-	groupFactory dynamicinformer.DynamicSharedInformerFactory
-	Nodes        corelisters.NodeLister
-	Pods         corelisters.PodLister
-	PodGroups    cache.GenericLister
-	GroupViews   *group.Store
-	synced       []cache.InformerSynced
+	factory       informers.SharedInformerFactory
+	groupFactory  dynamicinformer.DynamicSharedInformerFactory
+	Nodes         corelisters.NodeLister
+	Pods          corelisters.PodLister
+	PodGroups     cache.GenericLister
+	GroupViews    *group.Store
+	podInformer   cache.SharedIndexInformer
+	groupInformer cache.SharedIndexInformer
+	synced        []cache.InformerSynced
 }
 
 func New(client kubernetes.Interface, groupClient dynamic.Interface) (*Informers, error) {
@@ -45,12 +47,14 @@ func New(client kubernetes.Interface, groupClient dynamic.Interface) (*Informers
 		return nil, err
 	}
 	return &Informers{
-		factory:      factory, // 这是用来统一的管理所有的informer的，如果每次我要一个个确认很麻烦
-		Nodes:        nodes.Lister(),
-		Pods:         pods.Lister(),
-		groupFactory: groupFactory,
-		PodGroups:    podGroups.Lister(),
-		GroupViews:   views,
+		factory:       factory, // 这是用来统一的管理所有的informer的，如果每次我要一个个确认很麻烦
+		Nodes:         nodes.Lister(),
+		Pods:          pods.Lister(),
+		groupFactory:  groupFactory,
+		PodGroups:     podGroups.Lister(),
+		GroupViews:    views,
+		podInformer:   podInformer,
+		groupInformer: groupInformer,
 		// hasSync是首次同步的标记，不是staleness的标记
 		synced: []cache.InformerSynced{nodeInformer.HasSynced, podInformer.HasSynced, groupInformer.HasSynced},
 	}, nil

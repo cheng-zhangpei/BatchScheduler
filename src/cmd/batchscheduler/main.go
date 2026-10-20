@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 
+	"batchscheduler/src/group"
 	"batchscheduler/src/informer"
+	"batchscheduler/src/staging"
 	"batchscheduler/src/utils"
 	"batchscheduler/src/workqueue"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -49,6 +51,21 @@ func run() error {
 		return err
 	}
 	queues := workqueue.New()
+	queues.Views = observed.GroupViews
+	center := staging.NewBuffer(observed.GroupViews)
+	queues.Staging = center
+	// 观察路径与 Active 出队接收路径并行；先接 Observe，Accept 消费循环后续实现。
+	// 回调发生时该 informer 的缓存已更新。Observe 只重查本地 Store 并登记事实，
+	// 不等待初始全量同步，也不执行调度或队列迁移；两种资源的后续事件会继续校正。
+	if err := observed.OnGroupChange(func(key group.Key) {
+		if err := center.Observe(ctx, staging.Observation{Group: key}); err != nil && ctx.Err() == nil {
+			slog.Error("更新调度中心观察失败", "namespace", key.Namespace, "group", key.Name, "error", err)
+		}
+		// Observe 只更新事实并提交去重 Key；评估由下面独立 worker 并发运行，
+		// 不在 informer 回调里执行 Evaluate/Apply，避免阻塞观察路径。
+	}); err != nil {
+		return err
+	}
 	ready := make(chan struct{})
 	done := make(chan error, 1)
 	// 这里开一个go routine专门用来ListAndWatch
@@ -60,6 +77,25 @@ func run() error {
 		return err
 	case <-ready:
 	}
+	// 缓存就绪后才启动评估，避免把初始跨资源 List 顺序当作任务异常。
+	evaluationDone := make(chan error, 1)
+	go func() {
+		evaluationDone <- center.RunEvaluations(ctx, 32, func(_ context.Context, decisions []staging.Decision) error {
+			for _, decision := range decisions {
+				if decision.Action != staging.ActionWait {
+					slog.Debug("组评估完成，动作执行待接入", "group", decision.Group, "unit", decision.Unit, "action", decision.Action, "reason", decision.Reason)
+				}
+			}
+			// TODO：接 Apply；当前只产出决策，不假装已经调度、回滚或清理。
+			return nil
+		})
+	}()
+	defer func() {
+		stop()
+		if err := <-evaluationDone; err != nil {
+			slog.Error("评估 worker 退出", "error", err)
+		}
+	}()
 
 	// 从本地缓存读取，只用于验证观察链路；这不是调度器的资源快照。
 	nodes, err := observed.Nodes.List(labels.Everything())
@@ -82,7 +118,7 @@ func run() error {
 	}
 	slog.Info("informer 初始缓存已同步", "nodes", len(nodes), "pods", len(pods), "podGroups", len(groups))
 	// 先把调用位置放在 main：初始同步后，逐组读取视图并交给 Select。
-	// Select 仍是空入口；这里也只处理启动时的组，后续变化的事件回调尚未接入。
+	// Select 使用默认首次入队策略；后续变化的事件回调尚未接入。
 	for _, object := range groups {
 		metadata, err := meta.Accessor(object)
 		if err != nil {
@@ -97,7 +133,9 @@ func run() error {
 		if !utils.ShouldEnqueue(view) {
 			continue
 		}
-		queues.Select(view)
+		if err := queues.Select(workqueue.SelectRequest{View: view, Nodes: nodes}); err != nil {
+			slog.Error("组调度入口处理失败", "namespace", metadata.GetNamespace(), "name", metadata.GetName(), "error", err)
+		}
 	}
 	return <-done
 }

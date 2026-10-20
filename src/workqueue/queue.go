@@ -3,6 +3,7 @@ package workqueue
 
 import (
 	"context"
+	"sync"
 
 	"batchscheduler/src/group"
 )
@@ -30,14 +31,16 @@ type FailQueue interface {
 	Remove(UnitKey)
 }
 
-// Retry 保存组正在等待的条件，当前先用文字表达，之后再细化条件类型。
-// 此处不引入退避时长，也不假设任意集群事件都能唤醒该组。
+// Retry 保存单元的重试门槛，不假设任意集群事件都能唤醒它。
 type Retry struct {
 	Unit       Unit
 	WaitingFor string
+	Plan       RetryPlan
+	// ChangeObserved 记住本次等待期间的相关变化，避免退避结束前收到的事件丢失。
+	ChangeObserved bool
 }
 
-// RetryQueue 保存等待条件变化的组；条件判断及回到 active 的动作尚未实现。
+// RetryQueue 保存等待条件变化的单元；不自行监听事件或启动定时器。
 type RetryQueue interface {
 	Put(Retry)
 	Get(UnitKey) (Retry, bool)
@@ -47,11 +50,26 @@ type RetryQueue interface {
 // WorkQueue 组织三个基础队列和一个快速重试通道。
 // 跨队列流转、单元互斥及消费顺序尚未实现。
 // 调用方应通过 Transition 请求队列间迁移，不自行拼接 Remove 和 Add/Put。
+// 首次入队由 Select 直接分发到目标队列。
 // 当前字段仍公开供学习查看；实现迁移时再收紧写入边界。
 type WorkQueue struct {
-	Active ActiveQueue
-	Fail   FailQueue
-	Retry  RetryQueue
+	// selectMu 暂时串行保护组装和归属登记，后续再考虑按组拆分锁。
+	selectMu sync.Mutex
+	groups   map[group.Key]*selectionState
+	nextID   uint64
+	// Policy 决定目标队列；nil 时仅组装，不猜测尚未确定的队列规则。
+	// 须在开始处理事件前配置，不能在 Select 并发执行时替换。
+	Policy SelectionPolicy
+	// Views 为 Pod 来源补齐组上下文，开始处理事件前配置。
+	Views GroupViewReader
+	// Staging 由未来暂存区提供，查询须快速且不得回调 WorkQueue。
+	// 处理事件前配置；nil 表示暂存区尚未接入。
+	Staging StagingLookup
+	// MakeUnit 是单元实现的替换入口，默认使用 NewUnit。
+	MakeUnit func(UnitKey, SubmitMode) Unit
+	Active   ActiveQueue
+	Fail     FailQueue
+	Retry    RetryQueue
 	// FastRetry 放已获准优先再尝试的单元，复用 FIFO 存取机制。
 	// TODO：定义严格准入条件，以及最高优先级如何避免挤压普通单元。
 	FastRetry ActiveQueue
@@ -59,16 +77,12 @@ type WorkQueue struct {
 
 func New() *WorkQueue {
 	return &WorkQueue{
+		groups:    make(map[group.Key]*selectionState),
+		MakeUnit:  NewUnit,
+		Policy:    DefaultPolicy,
 		Active:    newActiveQueue(),
 		Fail:      &failQueue{items: make(map[UnitKey]Failure)},
 		Retry:     &retryQueue{items: make(map[UnitKey]Retry)},
 		FastRetry: newActiveQueue(),
 	}
-}
-
-// Select 是组视图到队列的边界，尚未实现，也尚未接入事件回调。
-func (w *WorkQueue) Select(view *group.View) {
-	// TODO：队列内部再次校验，不依赖入口过滤已经通过；具体校验规则待讨论。
-	// TODO：从组视图确定本轮 Unit，再选择队列；不在这里提前固定拆分与流转规则。
-	// TODO：确定目标后，通过 Transition 统一提交入队意图。
 }
