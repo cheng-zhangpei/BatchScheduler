@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -52,7 +53,20 @@ func run() error {
 	}
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
-	center := staging.NewBuffer(observed.GroupViews)
+	center := staging.NewBuffer(observed.GroupViews, staging.Handlers{
+		SelectGroup: func(_ context.Context, view *group.View) error {
+			if !utils.ShouldEnqueue(view) {
+				return nil
+			}
+			nodes, err := observed.Nodes.List(labels.Everything())
+			if err != nil {
+				return err
+			}
+			return queues.Select(workqueue.SelectRequest{View: view, Nodes: nodes})
+		},
+		// Execute 和 Handoff 待实际执行器及 workqueue 交接适配器实现后注入。
+		// 缺少适配器时 Apply 返回明确错误并保留原记录，不模拟调度或清理成功。
+	})
 	queues.Staging = center
 	// 观察路径与 Active 出队接收路径并行；先接 Observe，Accept 消费循环后续实现。
 	// 回调发生时该 informer 的缓存已更新。Observe 只重查本地 Store 并登记事实，
@@ -80,14 +94,23 @@ func run() error {
 	// 缓存就绪后才启动评估，避免把初始跨资源 List 顺序当作任务异常。
 	evaluationDone := make(chan error, 1)
 	go func() {
-		evaluationDone <- center.RunEvaluations(ctx, 32, func(_ context.Context, decisions []staging.Decision) error {
+		evaluationDone <- center.RunEvaluations(ctx, 32, func(ctx context.Context, decisions []staging.Decision) error {
+			var failures []error
 			for _, decision := range decisions {
-				if decision.Action != staging.ActionWait {
-					slog.Debug("组评估完成，动作执行待接入", "group", decision.Group, "unit", decision.Unit, "action", decision.Action, "reason", decision.Reason)
+				if err := center.Apply(ctx, decision); err != nil {
+					switch {
+					case errors.Is(err, staging.ErrHandlerUnavailable):
+						slog.Debug("动作适配器待接入", "group", decision.Group, "action", decision.Action)
+					case errors.Is(err, staging.ErrStaleDecision):
+						if err := center.Observe(ctx, staging.Observation{Group: decision.Group}); err != nil {
+							failures = append(failures, err)
+						}
+					default:
+						failures = append(failures, err)
+					}
 				}
 			}
-			// TODO：接 Apply；当前只产出决策，不假装已经调度、回滚或清理。
-			return nil
+			return errors.Join(failures...)
 		})
 	}()
 	defer func() {
@@ -118,7 +141,7 @@ func run() error {
 	}
 	slog.Info("informer 初始缓存已同步", "nodes", len(nodes), "pods", len(pods), "podGroups", len(groups))
 	// 先把调用位置放在 main：初始同步后，逐组读取视图并交给 Select。
-	// Select 使用默认首次入队策略；后续变化的事件回调尚未接入。
+	// Select 使用默认首次入队策略；后续新成员经 Observe → Evaluate → Apply 再进入 Select。
 	for _, object := range groups {
 		metadata, err := meta.Accessor(object)
 		if err != nil {

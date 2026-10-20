@@ -52,6 +52,9 @@ type Unit interface {
 	MarkRetry(RetryPlan) error
 	// MarkActive 只登记 Retry → Active，实际搬移由 Transition 完成。
 	MarkActive() error
+	// MarkProcessing / MarkFinished 登记暂存区接收与完成；不操作实际队列条目。
+	MarkProcessing() error
+	MarkFinished() error
 }
 
 // schedulingUnit 是默认实现，同一个对象贯穿组装、冻结及后续处理。
@@ -207,5 +210,25 @@ func (u *schedulingUnit) MarkActive() error {
 	u.state.WaitingFor = ""
 	u.state.RetryAfter = nil
 	// 历史失败仍保留作诊断，不把它当成本轮调度结果。
+	return nil
+}
+
+func (u *schedulingUnit) MarkProcessing() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.state.Phase != UnitQueued || (u.state.Queue != QueueActive && u.state.Queue != QueueFastRetry) {
+		return fmt.Errorf("只有 Active/FastRetry 出队单元可以进入处理阶段")
+	}
+	u.state.Phase, u.state.Queue = UnitProcessing, QueueNone
+	return nil
+}
+
+func (u *schedulingUnit) MarkFinished() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.state.Phase != UnitProcessing {
+		return fmt.Errorf("只有处理中的单元可以确认本轮结束")
+	}
+	u.state.Phase, u.state.Queue = UnitDone, QueueNone
 	return nil
 }

@@ -12,7 +12,7 @@ import (
 // 不等凑满一批，不为每个通知创建 goroutine。同组待处理通知去重；处理期间再次
 // 收到通知，Done 后会重新入队，因此不会因合批丢失最后一次变化。
 // 这里使用 client-go 的处理队列，区别于保存调度 Unit 的业务 workqueue。
-// handle 在锁外接收各组决策；本步 main 仅展示决策，Apply 尚未实现。
+// handle 在锁外接收各组决策；main 经 Apply 分发，实际执行器和交接仍须注入。
 func (b *Buffer) RunEvaluations(ctx context.Context, batchSize int, handle func(context.Context, []Decision) error) error {
 	if batchSize <= 0 || handle == nil {
 		return fmt.Errorf("评估 worker 需要正数批量上限及决策处理器")

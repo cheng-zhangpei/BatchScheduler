@@ -148,6 +148,17 @@ func evaluateRecord(key workqueue.UnitKey, record *Record, invalidGroup bool) De
 		}
 		return decision
 	}
+	if record.NextOperation != "" {
+		for _, fact := range record.Observed.Members {
+			if fact.NodeName != "" {
+				// 计划生成后出现部分外部绑定，不能继续按旧计划预留或重复绑定。
+				decision.Reason = "PartialBindingAwaitingFeedback"
+				return decision
+			}
+		}
+		decision.Action, decision.Operation, decision.Reason = ActionExecute, record.NextOperation, "ContinueExecution"
+		return decision
+	}
 	if allUnscheduled {
 		// 排队后部分成员已绑定时不能拿整轮重新调度，等待执行记录对齐。
 		for _, fact := range record.Observed.Members {

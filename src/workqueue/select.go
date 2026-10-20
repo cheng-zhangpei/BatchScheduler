@@ -68,7 +68,7 @@ type selectionState struct {
 // Select 是唯一的首次入队入口：识别处理粒度 → 组装单元 → 策略判断 → 直接分发。
 // 已入队单元的队列间迁移由 Transition 负责。
 // TODO：感知机的待确定区确认结果后可重新提交视图；旧单元归属释放后才能组织新一轮。
-// 当前入口仍由 main 在初始同步后调用，持续事件及已结束单元的归属清理尚未接入。
+// main 初始同步及 Center 的组级 Apply 都可调用；旧单元归属清理仍待交接适配器接入。
 func (w *WorkQueue) Select(request SelectRequest) error {
 	if (request.Pod == nil) == (request.View == nil) {
 		return fmt.Errorf("Select 必须且只能提供 Pod 或组视图中的一个")

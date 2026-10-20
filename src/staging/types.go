@@ -29,17 +29,19 @@ const (
 )
 
 // Feedback 只对应本地已登记的执行操作，区别于无需本地记录的 Observation。
-// ActionID 区分同一 Unit 的不同操作，拒绝旧回调覆盖后续阶段；生成规则待实现。
-// Pod 为 nil 时反馈针对整个操作；非 nil 时针对其中一个成员。
+// ActionID 由 Apply 生成，用于拒绝旧回调覆盖后续阶段。
+// 当前只接受 Pod=nil 的整操作汇总；逐成员反馈聚合留待后续实现。
 // Unknown 表示结果待确认；Failure 为空且 Unknown 为 false 表示该操作成功，
 // 不意味着整个 Unit 已完成。未知结果即使有诊断错误，也不能按确认失败处理。
 type Feedback struct {
-	Unit      workqueue.UnitKey
-	ActionID  string
-	Operation Operation
-	Pod       *workqueue.PodRef
-	Unknown   bool
-	Failure   *group.FailureInfo
+	Unit                    workqueue.UnitKey
+	ActionID                string
+	Operation               Operation
+	Pod                     *workqueue.PodRef
+	Unknown                 bool
+	Failure                 *group.FailureInfo
+	Plan                    map[workqueue.PodRef]string // Schedule 成功时提交完整成员 → 节点计划。
+	ResponsibilitiesSettled bool                        // Bind/Recover 成功时明确确认账目与在途责任已结清。
 }
 
 type Action string
@@ -55,7 +57,7 @@ const (
 // Unit 可为空：观察入口可能在没有本地执行记录时决定组织新一轮任务。
 // Unit 非空时 Revision 是本轮 Record 的版本，不是 Kubernetes resourceVersion；
 // 变化后旧决策须重新评估。组级 Unit=nil 决策不保留版本，执行时须重读 Store。
-// Apply 的实际版本核对、动作载荷和幂等执行留到下一步补齐。
+// Apply 刷新观察、重评并核对版本，登记动作身份后在锁外调用适配器。
 type Decision struct {
 	Group     group.Key
 	Unit      *workqueue.UnitKey
@@ -72,7 +74,7 @@ type Decision struct {
 // 与长期 Group 资源不同，它只持有尚未结清的本轮责任，不复制整份 informer 缓存。
 // Unit 成员已冻结；未来 compaction 必须创建新 Unit，不能修改本轮在途成员。
 //
-// Buffer 已实现登记、索引和锁；容量限制、超时与释放逻辑尚未实现。
+// Buffer 已实现登记、索引和交接确认后的释放；容量限制和自动超时策略未实现。
 // PendingAction 表示等待结果的操作；具体资源预留及交接凭据待资源缓存设计时补充，
 // 不能仅凭 PendingAction 为空就判定所有责任已结清并删除记录。
 type Record struct {
@@ -89,6 +91,11 @@ type Record struct {
 	// 两者缺省 false，不能凭 Pod 已绑定、PendingAction 为空就假设资源账目已结清。
 	RecoveryComplete        bool
 	ResponsibilitiesSettled bool
+	NextOperation           Operation
+	Plan                    map[workqueue.PodRef]string
+	PendingOperation        Operation
+	PendingDecision         Action
+	LastFeedback            *Feedback // 只保留最近一次已确认反馈用于幂等，不累积历史。
 }
 
 // ObservedGroup 只保存本轮成员所需事实，不长期复制整个组及其所有 Pod。

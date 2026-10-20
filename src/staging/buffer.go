@@ -12,8 +12,8 @@ import (
 	clientqueue "k8s.io/client-go/util/workqueue"
 )
 
-// Buffer 已实现 Accept、Observe、Evaluate 和 ContainsPod，以及独立评估 worker。
-// 其余 Center 方法逐个补充，当前尚不声明完整实现 Center。
+// Buffer 实现 Center 接收、观察、评估、动作分发、反馈和释放，以及独立评估 worker。
+// 外部调度/绑定执行器和 workqueue 交接由注入的 Handlers 实现，不在这里冒充完成。
 //
 // records 按执行单元保存独立记录；groups 将同组单元关联起来；owners 防止
 // 成员重复在途。Partial 可以同组多单元，Atomic 同时最多接收一个整组单元。
@@ -30,13 +30,20 @@ type Buffer struct {
 	evaluations clientqueue.TypedInterface[group.Key]
 	runMu       sync.Mutex
 	runStarted  bool
+	handlers    Handlers
+	nextAction  uint64
 }
 
 // NewBuffer 注入缓存视图读取边界并建立去重评估队列，不启动协程或调度。
 // views 应为 group.Store，不应在 Get 中发起网络调用或回调 Buffer。
-func NewBuffer(views workqueue.GroupViewReader) *Buffer {
+func NewBuffer(views workqueue.GroupViewReader, handlers ...Handlers) *Buffer {
+	var effects Handlers
+	if len(handlers) > 0 {
+		effects = handlers[0]
+	}
 	return &Buffer{
-		views: views, records: make(map[workqueue.UnitKey]*Record),
+		handlers: effects,
+		views:    views, records: make(map[workqueue.UnitKey]*Record),
 		groups:      make(map[group.Key]map[workqueue.UnitKey]struct{}),
 		owners:      make(map[group.Key]map[types.UID]workqueue.UnitKey),
 		evaluations: clientqueue.NewTyped[group.Key](),
@@ -83,6 +90,14 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	state := unit.State()
 	// Fail/Retry 尚未获准执行；不能绕过 Transition 直接塞入缓冲区。
 	if state.Phase != workqueue.UnitQueued || (state.Queue != workqueue.QueueActive && state.Queue != workqueue.QueueFastRetry) {
+		// 同一次交接可能刚被并发 Accept 改为 Processing；等待登记锁后再查一次，
+		// 不把已经成功接收的重复请求误判成非法来源。
+		b.mu.RLock()
+		exists, err := b.checkDuplicate(key, mode, refs)
+		b.mu.RUnlock()
+		if exists || err != nil {
+			return err
+		}
 		return fmt.Errorf("Accept 只接收 Active/FastRetry 来源的待执行单元")
 	}
 	if b.views == nil {
@@ -129,6 +144,10 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 
 	// 所有拒绝条件先检查完，再一次性建立记录与索引
 	record := &Record{Unit: unit, Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1, Generation: view.Group.Generation}
+	// 所有拒绝条件通过后登记处理中状态；实际 Pop 仍是调用方交接契约。
+	if err := unit.MarkProcessing(); err != nil {
+		return err
+	}
 	if b.groups[key.Group] == nil {
 		b.groups[key.Group] = make(map[workqueue.UnitKey]struct{})
 		b.owners[key.Group] = make(map[types.UID]workqueue.UnitKey)
