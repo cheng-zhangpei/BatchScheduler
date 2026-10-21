@@ -6,20 +6,20 @@ import (
 	"reflect"
 
 	"batchscheduler/src/group"
+	errorengine "batchscheduler/src/staging/error_engine"
 	"batchscheduler/src/workqueue"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
-// Observe 是独立于 Accept 的观察入口；只更新事实，不启动绑定、释放或回送。
-// 未被 Accept 持有的组也可以观察，不为它凭空创建 Unit 或成员执行归属。
-// 当前 main 在 informer 回调直接调用 Observe，独立 worker 消费提示后执行 Evaluate。
-// 无本地 Unit 时，最新资源仍由 Store 保持，后续评估可据此组织任务。
-// 不保存无人持有的组快照，避免短任务流量让暂存区变成第二份无限增长的缓存。
+// Observe 收到“这个组变了”的通知后，重读缓存、更新已有 Record，再通知评估。
+// 没有 Record 也通知评估，因为可能有新成员需要入队；但不会额外长期保存这个组。
+// 读取 Pod 后，把支持的调度异常匹配成内部错误；这里不执行绑定、恢复或删除。
 func (b *Buffer) Observe(ctx context.Context, observation Observation) error {
 	return b.observe(ctx, observation, true)
 }
 
-// notify=false 仅供评估 worker 刷新事实，不重复通知自身。
+// notify=false 用于评估或 Apply 前再读一次缓存，读完不重复通知评估线程。
+// 否则评估线程每读一次，就给自己再排一次任务，会一直空转。
 func (b *Buffer) observe(ctx context.Context, observation Observation, notify bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -32,8 +32,10 @@ func (b *Buffer) observe(ctx context.Context, observation Observation, notify bo
 		return fmt.Errorf("Observe 缺少组视图读取器")
 	}
 	b.observeMu.Lock()
+	// 这把锁覆盖“读取缓存 → 写回观察”的整个过程。
+	// 否则两次读取可能倒着写回：后读的新状态先写，先读的旧状态后写。
 	defer b.observeMu.Unlock()
-	// 事件只触发重查，不使用事件中的旧 Pod/旧 View 回写本轮事实。
+	// 事件里可能带着旧 Pod；这里只用组编号，实际信息重新向 Store 查询。
 	view, err := b.views.Get(key.Namespace, key.Name)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("Observe 读取组视图: %w", err)
@@ -57,6 +59,7 @@ func (b *Buffer) observe(ctx context.Context, observation Observation, notify bo
 		return err
 	}
 	for unitKey := range b.groups[key] {
+		// 每个 Unit 只保存自己成员的观察，不复制整个组的所有 Pod。
 		record := b.records[unitKey]
 		facts := &ObservedGroup{Exists: exists, Members: make(map[workqueue.PodRef]ObservedPod, len(record.Members))}
 		if exists {
@@ -69,18 +72,19 @@ func (b *Buffer) observe(ctx context.Context, observation Observation, notify bo
 				pod := member.Pod
 				fact.Present, fact.Deleting, fact.NodeName = true, pod.DeletionTimestamp != nil, pod.Spec.NodeName
 				fact.Status = *pod.Status.DeepCopy()
+				// 原生错误在这里转为内部错误，Evaluate 以后只读 Failure，不再解析 Reason。
+				fact.Failure = errorengine.MapPodSchedulingError(pod)
 			}
 			facts.Members[ref] = fact
 		}
-		// 不更改 Members/owners，不把 Pending、容器崩溃或成员缺失直接映射成
-		// 调度错误，也不因组删除而丢失在途责任；后续决策读取这两份状态再判断。
+		// 只替换 Observed：旧观察可以丢弃，不保留每次变化的历史。
+		// Members 里的执行进度和 owners 里的处理关系都不在这里改。
 		if !reflect.DeepEqual(record.Observed, facts) {
 			record.Observed = facts
 			record.Revision++
 		}
 	}
-	// 这里只入队，不在 informer 回调执行评估；同组重复通知会合并。
-	// 即使没有本地 Unit 也提交提示，让评估侧处理新组/新成员。
+	// 放的是 Group Key，意思是“稍后检查这个组”；不是把 Pod/Unit 再入队一次。
 	if notify {
 		b.evaluations.Add(key)
 	}

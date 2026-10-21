@@ -128,10 +128,6 @@ func TestInformerCallbackUpdatesBufferOnPodChangeAndDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := view.Members[0].Pod.DeepCopy()
-	pod.Spec.NodeName = "node-a"
-	if _, err := client.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
 	waitFor := func(match func(ObservedPod) bool) {
 		t.Helper()
 		for {
@@ -147,7 +143,30 @@ func TestInformerCallbackUpdatesBufferOnPodChangeAndDeletion(t *testing.T) {
 			}
 		}
 	}
-	waitFor(func(f ObservedPod) bool { return f.Present && f.NodeName == "node-a" })
+	// 从 fake API 写入原生调度失败，让 informer 真正经 Observe 完成错误映射。
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable}}
+	if _, err := client.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func(f ObservedPod) bool { return f.Failure != nil && f.Failure.Reason == workqueue.ReasonUnschedulable })
+	ds, err := b.Evaluate(ctx, u.Key().Group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched := false
+	for _, d := range ds {
+		if d.Unit != nil && *d.Unit == u.Key() {
+			matched = d.Action == ActionExecute && d.Operation == OperationRecover && d.Failure != nil && d.Failure.Reason == workqueue.ReasonUnschedulable
+		}
+	}
+	if !matched {
+		t.Fatalf("informer 异常没有传到 Evaluate/error_engine: %+v", ds)
+	}
+	pod.Spec.NodeName = "node-a"
+	if _, err := client.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func(f ObservedPod) bool { return f.Present && f.NodeName == "node-a" && f.Failure == nil })
 	if err := client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}

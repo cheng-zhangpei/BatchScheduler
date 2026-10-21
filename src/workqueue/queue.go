@@ -18,9 +18,10 @@ type ActiveQueue interface {
 
 // Failure 保存一次失败的原因，不在这里决定是否重试。
 type Failure struct {
-	Unit    Unit
-	Reason  string
-	Message string
+	RecoveryComplete bool // 回送者明确确认本轮资源已结清；仅在 Fail 中不代表已恢复。
+	Unit             Unit
+	Reason           string
+	Message          string
 }
 
 // FailQueue 按单元保留失败记录，Put 更新同单元已有记录。

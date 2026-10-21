@@ -9,10 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// RetryWake 是一个已筛选到目标 Unit 的唤醒提示，不是原始 informer 事件。
-// Changed 为空表示只检查时间；事件入口须先判断该变化是否可能帮助此 Unit。
-// Now 显式传入，方便逐步接入定时器和确定性测试。
-// TODO：接入 informer 事件筛选、候选索引和定时器；这里不扫描所有 Retry。
+// RetryWake 告诉一个 Retry 任务“哪种条件变了，以及现在几点”。
+// Changed 为空表示只检查时间，不代表资源有改善。来源是 Buffer 的评估决定，不是原始 Pod。
+// main 已接节点等事件和定时通知；更多依赖资源的事件还要逐项增加。
 type RetryWake struct {
 	Changed RetryCondition
 	Now     time.Time
@@ -34,11 +33,14 @@ func (w *WorkQueue) activateRetry(request TransitionRequest) error {
 	}
 	unit := retry.Unit
 	state := unit.State()
+	if request.ExpectedRevision != 0 && state.Revision != request.ExpectedRevision {
+		return fmt.Errorf("Retry 迁移决策已过期")
+	}
 	if state.Phase != UnitQueued || state.Queue != QueueRetry {
 		return fmt.Errorf("Retry 条目与单元状态不一致")
 	}
-	// 即使退避尚未到期，也记住相关事件；时间到期时可以再次使用。
-	if retry.Plan.Condition != RetryOnBackoff && request.Wake.Changed == retry.Plan.Condition && request.Wake.Changed != "" {
+	// 变化先到、时间还没到，也先记住 ChangeObserved=true；到期后就不用再等同类变化。
+	if retry.Plan.Condition != RetryOnBackoff && retry.Plan.Condition.Matches(request.Wake.Changed) {
 		retry.ChangeObserved = true
 		w.Retry.Put(retry)
 	}
@@ -46,7 +48,7 @@ func (w *WorkQueue) activateRetry(request TransitionRequest) error {
 		return ErrRetryNotReady
 	}
 	switch retry.Plan.Condition {
-	case RetryOnResources, RetryOnNodes, RetryOnPlacement, RetryOnDependency:
+	case RetryOnScheduling, RetryOnResources, RetryOnNodes, RetryOnPlacement, RetryOnDependency:
 		if !retry.ChangeObserved {
 			return ErrRetryNotReady
 		}
@@ -57,7 +59,7 @@ func (w *WorkQueue) activateRetry(request TransitionRequest) error {
 	default:
 		return fmt.Errorf("未知重试条件: %q", retry.Plan.Condition)
 	}
-	// 相关事件只是值得重试的提示；激活前还要重查缓存事实及内部归属。
+	// 收到事件不代表一定能重试：先确认原来的组和成员还在，且没有其他执行正在处理。
 	if w.Views == nil {
 		return fmt.Errorf("激活重试缺少组视图读取器")
 	}
@@ -89,7 +91,7 @@ func (w *WorkQueue) activateRetry(request TransitionRequest) error {
 			return fmt.Errorf("成员 %s 已变化、结束或已绑定，不能激活旧单元", member.Name)
 		}
 	}
-	// =========================================前面是一大堆的过滤，过滤出可以放入active的内容=======================
+	// 前面检查都通过，才把同一个 Unit 从 Retry 搬到 Active；成员集合不改变。
 	if err := unit.MarkActive(); err != nil {
 		return err
 	}

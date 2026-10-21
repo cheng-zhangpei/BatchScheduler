@@ -24,6 +24,7 @@ const (
 // 仅 UnitNew 阶段允许追加成员；冻结后继续流转，不回到组装阶段。
 // 当前接入创建、冻结和首次入队，后续阶段留待统一流转入口维护。
 type UnitState struct {
+	Revision    uint64 // 生命周期版本；队列迁移决策必须针对它，不使用 Center.Record.Revision。
 	Phase       UnitPhase
 	Queue       QueueName
 	LastFailure *group.FailureInfo

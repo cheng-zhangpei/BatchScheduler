@@ -7,11 +7,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// OnGroupChange 必须在 Run 前注册。回调通知 Observe 更新本地事实，不运行调度或 API。
-// Pod/CR 两个 informer 的回调可以并发到达；notify 必须并发安全。
-// 回调中的缓存已更新，但两种资源缓存并非原子同步；Observe 须读取最新 Store。
-// notify 必须保持轻量；绑定/恢复等慢操作不能直接进入此回调。
-// CR 和 Pod 都发通知，确保初始 List 顺序不同、Pod 改组和同名 CR 重建时能重查。
+// OnGroupChange 在 Run 前注册“组/Pod 变化后要调用的函数”，main 传入的是调用 Observe 的函数。
+// informer 先更新自己的缓存，再调用它；Pod 和组的通知可能同时到达，Observe 要能处理。
+// 两种缓存不是一起更新的，所以后续事件仍可能补上此前缺少的组或成员信息。
+// 这里不执行绑定或恢复，避免一个慢请求挡住后面的资源变化通知。
 func (i *Informers) OnGroupChange(notify func(group.Key)) error {
 	podChanged := func(obj interface{}) {
 		if pod, ok := deletedObject(obj).(*corev1.Pod); ok {
@@ -39,7 +38,8 @@ func (i *Informers) OnGroupChange(notify func(group.Key)) error {
 	return err
 }
 
-// Watch 删除可能只有墓碑；仍取旧对象身份去通知，不能忽略尚未结清的旧归属。
+// deletedObject 处理删除通知的包装对象，从里面取出旧 Pod/组的编号。
+// 删除事件即使晚到，也要通知 Observe 重新查看，不能直接忽略。
 func deletedObject(obj interface{}) interface{} {
 	switch tombstone := obj.(type) {
 	case cache.DeletedFinalStateUnknown:

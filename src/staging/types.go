@@ -6,33 +6,31 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Observation 是独立的集群观察输入。
-// Group 是变化提示的精确身份，Pod 可进一步指出触发成员，包括删除的旧 UID。
-// Observe 会重新读 Store，View 只保留为来源上下文，不作为覆盖当前事实的依据。
-// 因此迟到的删除事件不会覆盖当前缓存；同名新 Group 也不会冒充旧 UID。
-// TODO：原生错误到内部失败结果的映射，由后续 Evaluate/感知规则实现。
-// 不得长期持有 informer 缓存对象并修改它们；需要保留时复制必要字段。
+// Observation 表示“这个组可能变了，请再看一遍”。当前实际只使用 Group。
+// Pod、View 暂时只是预留字段；Observe 会重新读缓存，不直接采用传入的旧对象。
+// 三种标准调度原因已在 Observe 中映射；TODO：继续补充其他明确的原生原因。
+// 容器崩溃不能直接当成调度失败。
 type Observation struct {
 	Group group.Key
 	Pod   *workqueue.PodRef // nil 表示组级观察；非 nil 不代表一定需要重调度。
 	View  *group.View
 }
 
-// Operation 表示交给执行器的工作阶段，不表示已经执行成功。
+// Operation 表示让执行器做哪件事：算节点、预占资源、绑定、恢复。
 type Operation string
 
 const (
+	ActionSelect      Action    = "Select"     // 组织未被 Center 持有的成员，交给首次入队入口。
+	ActionTransition  Action    = "Transition" // 对队列持有的 Unit 执行迁移，不借用 Center 的 Record。
 	OperationSchedule Operation = "Schedule"
 	OperationAssume   Operation = "Assume"
 	OperationBind     Operation = "Bind"
 	OperationRecover  Operation = "Recover"
 )
 
-// Feedback 只对应本地已登记的执行操作，区别于无需本地记录的 Observation。
-// ActionID 由 Apply 生成，用于拒绝旧回调覆盖后续阶段。
-// 当前只接受 Pod=nil 的整操作汇总；逐成员反馈聚合留待后续实现。
-// Unknown 表示结果待确认；Failure 为空且 Unknown 为 false 表示该操作成功，
-// 不意味着整个 Unit 已完成。未知结果即使有诊断错误，也不能按确认失败处理。
+// Feedback 是执行器返回的结果，例如“action-3 这次绑定成功了”。
+// 当前必须汇总整个操作再上报（Pod=nil），一个成员成功不能代表整个操作成功。
+// Unknown=true 表示还不知道成败；Unknown=false 且 Failure=nil 才表示这个操作成功。
 type Feedback struct {
 	Unit                    workqueue.UnitKey
 	ActionID                string
@@ -41,7 +39,7 @@ type Feedback struct {
 	Unknown                 bool
 	Failure                 *group.FailureInfo
 	Plan                    map[workqueue.PodRef]string // Schedule 成功时提交完整成员 → 节点计划。
-	ResponsibilitiesSettled bool                        // Bind/Recover 成功时明确确认账目与在途责任已结清。
+	ResponsibilitiesSettled bool                        // Bind/Recover 已收尾：没有还在跑的请求，资源预占也已释放或转成正式占用。
 }
 
 type Action string
@@ -53,53 +51,46 @@ const (
 	ActionRelease Action = "Release" // 已满足释放条件，结束本轮记录。
 )
 
-// Decision 是行为意图；Apply 必须重查依据，不能把历史决策直接作为执行授权。
-// Unit 可为空：观察入口可能在没有本地执行记录时决定组织新一轮任务。
-// Unit 非空时 Revision 是本轮 Record 的版本，不是 Kubernetes resourceVersion；
-// 变化后旧决策须重新评估。组级 Unit=nil 决策不保留版本，执行时须重读 Store。
-// Apply 刷新观察、重评并核对版本，登记动作身份后在锁外调用适配器。
+// Decision 是 Evaluate 写给 Apply 的下一步安排，本身不表示已经执行。
+// Select 没有指定 Unit；Execute/Return/Release 使用 Record.Revision 检查是否过期。
+// Transition 使用 Transition.ExpectedRevision，即队列中 Unit 的版本，不用 Record 的版本。
 type Decision struct {
-	Group     group.Key
-	Unit      *workqueue.UnitKey
-	Revision  uint64
-	Action    Action
-	Operation Operation // 仅 ActionExecute 使用。
-	Reason    string
-	To        workqueue.QueueName // ActionReturn 的建议目标；实际首次入队仍由 Select 决定。
-	Members   []workqueue.PodRef  // 本次恢复/回送范围；Atomic 为整轮，Partial 为失败子集。
-	Failure   *group.FailureInfo
+	Transition *workqueue.TransitionRequest // 仅迁移队列时使用：从哪里搬到哪里、依据哪个队列版本。
+	Group      group.Key
+	Unit       *workqueue.UnitKey
+	Revision   uint64
+	Action     Action
+	Operation  Operation // 仅 ActionExecute 使用。
+	Reason     string
+	To         workqueue.QueueName // ActionReturn 的建议目标；实际首次入队仍由 Select 决定。
+	Members    []workqueue.PodRef  // 这次要处理的成员；Atomic 取整轮，Partial 能定位错误时取失败成员。
+	Failure    *group.FailureInfo
 }
 
-// Record 是缓冲区的一条本轮执行记录；按 UnitKey 保存，按 Group/Pod UID 建索引。
-// 与长期 Group 资源不同，它只持有尚未结清的本轮责任，不复制整份 informer 缓存。
-// Unit 成员已冻结；未来 compaction 必须创建新 Unit，不能修改本轮在途成员。
-//
-// Buffer 已实现登记、索引和交接确认后的释放；容量限制和自动超时策略未实现。
-// PendingAction 表示等待结果的操作；具体资源预留及交接凭据待资源缓存设计时补充，
-// 不能仅凭 PendingAction 为空就判定所有责任已结清并删除记录。
+// Record 记录一个 Unit 这一轮做到哪了。Members 是我们自己的进度，Observed 是集群实际情况。
+// 它由 Accept 创建，本轮结束后删除，不保存 Group 的完整历史。
+// PendingAction 为空只说明当前没在等某个操作，不代表已经完成所有收尾。
 type Record struct {
 	Unit          workqueue.Unit
 	Members       map[workqueue.PodRef]group.PodState
-	PendingAction string
-	Observed      *ObservedGroup // nil 表示尚未观察；不代替 Members 的内部执行状态。
-	Revision      uint64         // 本轮记录版本；观察或执行状态改变后，旧决策需要重算。
-	Generation    int64          // 接收时的组声明版本；声明变化后不能继续执行旧计划。
-	// Failure 仅表示本轮已确认的执行失败，不从 Unit.LastFailure 历史记录复制。
-	Failure *group.FailureInfo
-	// RecoveryComplete 和 ResponsibilitiesSettled 必须由后续执行/恢复反馈明确登记。
-	// 前者说明所需恢复完成；后者说明无未知操作、预留已清理/交接且执行器已结束。
-	// 两者缺省 false，不能凭 Pod 已绑定、PendingAction 为空就假设资源账目已结清。
-	RecoveryComplete        bool
-	ResponsibilitiesSettled bool
-	NextOperation           Operation
-	Plan                    map[workqueue.PodRef]string
-	PendingOperation        Operation
-	PendingDecision         Action
-	LastFeedback            *Feedback // 只保留最近一次已确认反馈用于幂等，不累积历史。
+	PendingAction string         // 正在等哪个操作，例如 action-3；空字符串表示没有。
+	Observed      *ObservedGroup // 最近一次从 informer 缓存读到的成员情况；nil 表示还没读过。
+	Revision      uint64         // 这份 Record 改过几次；旧 Decision 不能直接用在新版记录上。
+	Generation    int64          // Accept 时组声明的版本，用来发现之后的声明修改。
+	// Failure 是执行器经 Report 确认的本轮失败，不从 Unit 的历史失败中照搬。
+	// informer 的匹配结果保存在 Observed.Members[ref].Failure，不会覆盖这里。
+	Failure                 *group.FailureInfo
+	RecoveryComplete        bool                        // 执行器已确认必要的恢复步骤完成，不是靠 Observe 猜出来的。
+	ResponsibilitiesSettled bool                        // 执行请求和资源预占都已收尾；它为 true 才可能删除本轮记录。
+	NextOperation           Operation                   // 上一步成功后，下一步准备做什么。
+	Plan                    map[workqueue.PodRef]string // 调度算法算出的 Pod → Node 计划。
+	PendingOperation        Operation                   // 正在等待的具体操作，例如 Bind。
+	PendingDecision         Action                      // 正在等待的动作类型，例如 Execute 或 Return。
+	LastFeedback            *Feedback                   // 只记住最近一次结果；相同结果再发来时不重复处理。
 }
 
-// ObservedGroup 只保存本轮成员所需事实，不长期复制整个组及其所有 Pod。
-// Exists=false 包括组删除或同名组已换 UID；不能据此断定原 Pod 已删除。
+// ObservedGroup 保存“这个 Unit 的成员在集群中是什么样”，不会复制组内所有无关 Pod。
+// Exists=false 表示没找到原来那个组；它的旧 Pod 可能还在，不能直接当作已删除。
 type ObservedGroup struct {
 	Exists     bool
 	Deleting   bool
@@ -108,11 +99,12 @@ type ObservedGroup struct {
 }
 
 type ObservedPod struct {
-	// Known=false：当前没有匹配 UID 的组视图，不能确认成员是否仍存在。
-	// Known=true、Present=false：精确成员已不在当前组视图，可能删除、重建或改归属。
+	Failure *group.FailureInfo // Observe 从 Pod 调度条件匹配出的内部错误；与执行器的 Record.Failure 分开保存。
+	// Known=false：原来的组查不到了，暂时无法从组视图确认这个 Pod 的情况。
+	// Known=true、Present=false：组还在，但里面已经没有这个名称和 UID 的成员。
 	Known    bool
 	Present  bool
 	Deleting bool
 	NodeName string
-	Status   corev1.PodStatus // 深拷贝，保留条件/容器错误供后续解释，不直接等同调度失败。
+	Status   corev1.PodStatus // 复制 Pod 状态供后面分析；当前还没有完整错误映射。
 }

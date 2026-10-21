@@ -4,13 +4,15 @@
 
 **整体调度流程尚未打通。Center 已实现动作分发、反馈及交接确认后的释放，模拟闭环通过；真实执行器、队列交接适配器、实际调度、Assume / Forget 和绑定仍未完成。** 架构边界、模块进度、测试范围与后续安排见[项目进度表](progress.md)。
 
+逐函数阅读 Buffer 请从 [Buffer 源码阅读说明](docs/buffer.md) 开始：数据结构、每阶段怎样判断、Apply/Report、Handoff 到底清什么，以及当前未完成的部分均按源码说明。
+
 当前已建立 PodGroup CR、Pod 成员视图及关联。`src/workqueue/` 保留 `Unit` 接口及一个默认实现，同一个单元从组装走向冻结；四个队列均以 Unit 存取。main 在初始同步后调用 `Select(SelectRequest{View: view, Nodes: nodes})`，查询 Pod 归属、复用或创建单元，并登记组内关系。默认策略为 Atomic 整组齐备后进 Active，Partial 按单 Pod 入 Active，已确认的内部异常进 Fail，绑定结果待确定时不入队。Select 直接首次入队；队列间迁移由 Transition 管理，已实现 Fail → Retry 及显式提示驱动的 Retry → Active。
 
-`src/workqueue/transition.go` 已实现 Fail → Retry：校验失败分类、恢复确认、当前归属及成员状态，保存结构化重试计划；相同请求重放不会重置退避时间。`retry_policy.go` 注释列出可重试类型、不能直接重试的情况，以及Retry → Active 的事件/时间门槛。`retry_wakeup.go` 已实现显式提示驱动的激活及状态复查，持续事件和定时器尚未接入，FastRetry 不参与本阶段迁移。缓冲区确认的失败经 Select 回送，不走 Active → Fail。
+`src/workqueue/transition.go` 已实现 Fail → Retry：校验失败分类、恢复确认、当前归属及成员状态，保存结构化重试计划；相同请求重放不会重置退避时间。`retry_policy.go` 列出可重试类型及等待条件。Evaluate 已读取 Fail/Retry 快照并生成迁移决策，Apply 调用真实 Transition；main 已接定时检查、节点变化、已绑定 Pod 删除和调度门移除的提示。其他依赖资源监听仍待实现，FastRetry 不参与本阶段迁移。缓冲区失败回送还依赖未实现的真实 Handoff，不走 Active → Fail。
 
-`src/staging/` 已实现 Center 的 Accept / Observe / Evaluate / Apply / Report / Release。Apply 重查决策和版本、登记动作身份后在锁外调用注入的执行器；Report 关联本轮结果，推动 Schedule → Assume → Bind，恢复后按范围回送；队列侧确认交接后才释放记录和索引。绑定或交接结果未知时保留责任。main 已接 Observe → 评估 worker → Apply → 新成员 Select；真实 Execute / Handoff 适配器缺失时明确报错，不静默模拟成功。
+`src/staging/` 提供 Accept / Observe / Evaluate / Apply / Report / Release。Observe 已将三种标准 Pod 调度原因匹配为内部错误，Evaluate 分阶段生成决定，再由 Apply 调用具体函数；Report 记录执行器结果。main 已接 Observe → 评估线程 → Apply → Select/Transition。真实 Execute/Handoff 未接入，因此当前程序不能完成实际调度、绑定和失败回送。未知操作结果保留等待标记，不假装完成。
 
-首次入队统一通过 `Select(SelectRequest)`，只处理有 PodGroup 归属的成员。Atomic 的 Pod 来源提升为组级，Partial 保留 Pod 粒度；`StagingLookup` 查询暂存归属，避免重复组装。Active.Pop → Accept 消费交接、持续事件到队列的反馈、资源缓存与 Assume / Forget、调度算法、绑定、operator 尚未实现。compaction、FastRetry 严格准入和 Agent 接入继续后置。
+首次入队统一通过 `Select(SelectRequest)`，只处理有 PodGroup 归属的成员。Atomic 的 Pod 来源提升为组级，Partial 保留 Pod 粒度；`StagingLookup` 查询哪些 Pod 已进入 Buffer，避免重复组装。Active.Pop → Accept、资源缓存与 Assume / Forget、调度算法、绑定、operator 尚未实现。compaction、FastRetry 严格准入和 Agent 接入继续后置。
 
 2026-10-20 收工：模拟执行器已验证正常释放和失败恢复回送；明天先复盘每个环节的权衡，再逐个接真实执行器与队列交接。最近 `go test ./src/... -count=1` 全部通过，尚未测试真实集群。
 
@@ -57,4 +59,4 @@ kubectl apply -f config/crd/scheduling.batchscheduler.io_podgroups.yaml
 3. `Start` 与 `WaitForCacheSync` 分别负责什么。
 4. lister 为什么从缓存读取，为什么返回对象不能直接修改。
 
-组关系的阅读入口见 [PodGroup 与 Pod 视图](docs/podgroup-view.md)。Select 已接通初始视图到工作队列的首次入队；持续业务事件处理器尚未注册。关联索引由 informer 的 Indexer 自动维护。informer 对象缓存与未来用于资源记账的调度缓存是不同职责。
+组关系的阅读入口见 [PodGroup 与 Pod 视图](docs/podgroup-view.md)。Select 已接初始视图首次入队；后续 Pod/Group 事件经 Observe/Evaluate/Apply 再检查 Select。关联索引由 informer 的 Indexer 自动维护。informer 对象缓存与未来用于资源记账的调度缓存是不同职责。

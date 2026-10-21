@@ -157,6 +157,7 @@ func (u *schedulingUnit) Freeze() error {
 	}
 	if u.state.Phase == UnitNew {
 		u.state.Phase = UnitFrozen
+		u.state.Revision++
 	}
 	return nil
 }
@@ -172,6 +173,7 @@ func (u *schedulingUnit) MarkQueued(queue QueueName, failure *group.FailureInfo,
 	if u.state.Phase != UnitFrozen || u.state.Queue != QueueNone {
 		return fmt.Errorf("只有已冻结且尚未入队的单元可以首次入队")
 	}
+	u.state.Revision++
 	u.state.Phase = UnitQueued
 	u.state.Queue = queue
 	u.state.WaitingFor = waitingFor
@@ -189,6 +191,7 @@ func (u *schedulingUnit) MarkRetry(plan RetryPlan) error {
 	if u.state.Phase != UnitQueued || u.state.Queue != QueueFail {
 		return fmt.Errorf("只有 Fail 中的单元可以迁入 Retry")
 	}
+	u.state.Revision++
 	u.state.Queue = QueueRetry
 	u.state.WaitingFor = string(plan.Condition)
 	u.state.RetryAfter = nil
@@ -206,6 +209,7 @@ func (u *schedulingUnit) MarkActive() error {
 	if u.state.Phase != UnitQueued || u.state.Queue != QueueRetry {
 		return fmt.Errorf("只有 Retry 中的单元可以重新进入 Active")
 	}
+	u.state.Revision++
 	u.state.Queue = QueueActive
 	u.state.WaitingFor = ""
 	u.state.RetryAfter = nil
@@ -219,6 +223,7 @@ func (u *schedulingUnit) MarkProcessing() error {
 	if u.state.Phase != UnitQueued || (u.state.Queue != QueueActive && u.state.Queue != QueueFastRetry) {
 		return fmt.Errorf("只有 Active/FastRetry 出队单元可以进入处理阶段")
 	}
+	u.state.Revision++
 	u.state.Phase, u.state.Queue = UnitProcessing, QueueNone
 	return nil
 }
@@ -229,6 +234,7 @@ func (u *schedulingUnit) MarkFinished() error {
 	if u.state.Phase != UnitProcessing {
 		return fmt.Errorf("只有处理中的单元可以确认本轮结束")
 	}
+	u.state.Revision++
 	u.state.Phase, u.state.Queue = UnitDone, QueueNone
 	return nil
 }

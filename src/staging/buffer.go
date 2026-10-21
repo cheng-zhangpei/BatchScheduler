@@ -12,48 +12,44 @@ import (
 	clientqueue "k8s.io/client-go/util/workqueue"
 )
 
-// Buffer 实现 Center 接收、观察、评估、动作分发、反馈和释放，以及独立评估 worker。
-// 外部调度/绑定执行器和 workqueue 交接由注入的 Handlers 实现，不在这里冒充完成。
-//
-// records 按执行单元保存独立记录；groups 将同组单元关联起来；owners 防止
-// 成员重复在途。Partial 可以同组多单元，Atomic 同时最多接收一个整组单元。
-// 三份登记受同一把锁保护，失败时不得留下部分记录。
+// Buffer 保存每个 Unit 的执行记录，接收集群变化，并安排下一步操作。
+// records 查执行进度；groups 查这个组有哪些 Unit；owners 查哪个 Unit 正在处理某个 Pod。
+// 三个 map 指向同一批任务，不是三份独立任务。新增和删除时必须一起更新。
 type Buffer struct {
-	mu sync.RWMutex
-	// 串行化 Observe 的读缓存和提交，避免较早读取的快照较晚写回。
-	// 不在持有 mu 时调用 Store，避免阻塞 ContainsPod/Accept 的索引操作。
+	mu sync.RWMutex // 保护下面的记录；一段代码改完后，另一段代码才能继续改。
+	// 一次只允许一个 Observe 读缓存并写回，避免先读到的旧信息反而后写进去。
 	observeMu   sync.Mutex
 	views       workqueue.GroupViewReader
-	records     map[workqueue.UnitKey]*Record
-	groups      map[group.Key]map[workqueue.UnitKey]struct{}
-	owners      map[group.Key]map[types.UID]workqueue.UnitKey
-	evaluations clientqueue.TypedInterface[group.Key]
+	records     map[workqueue.UnitKey]*Record                 // Unit 编号 → 执行记录。
+	groups      map[group.Key]map[workqueue.UnitKey]struct{}  // 组编号 → Buffer 中的 Unit 编号集合。
+	owners      map[group.Key]map[types.UID]workqueue.UnitKey // 组编号 + Pod UID → 正在处理它的 Unit。
+	evaluations clientqueue.TypedInterface[group.Key]         // 只放“哪个组需要再评估”，不放 Unit。
 	runMu       sync.Mutex
 	runStarted  bool
 	handlers    Handlers
 	nextAction  uint64
+	retryHints  map[workqueue.UnitKey]retryHint // 某个等待重试的 Unit 收到过什么变化提示。
 }
 
-// NewBuffer 注入缓存视图读取边界并建立去重评估队列，不启动协程或调度。
-// views 应为 group.Store，不应在 Get 中发起网络调用或回调 Buffer。
+// NewBuffer 建好 map 和评估通知队列，保存外部函数。它不会自动开始执行任务。
+// views 通常是 group.Store，Get 只读本地 informer 缓存，不应发网络请求。
 func NewBuffer(views workqueue.GroupViewReader, handlers ...Handlers) *Buffer {
 	var effects Handlers
 	if len(handlers) > 0 {
 		effects = handlers[0]
 	}
 	return &Buffer{
-		handlers: effects,
-		views:    views, records: make(map[workqueue.UnitKey]*Record),
+		retryHints: make(map[workqueue.UnitKey]retryHint),
+		handlers:   effects,
+		views:      views, records: make(map[workqueue.UnitKey]*Record),
 		groups:      make(map[group.Key]map[workqueue.UnitKey]struct{}),
 		owners:      make(map[group.Key]map[types.UID]workqueue.UnitKey),
 		evaluations: clientqueue.NewTyped[group.Key](),
 	}
 }
 
-// Accept 仅接住已经出队的冻结单元，不执行调度、不合并成员、不清理旧记录。
-// 现阶段 Active.Pop 尚未提供交接凭据，Unit 的 Queued 状态也未更新；因此这里只
-// 校验来源状态，无法证明已经实际 Pop。调用方须先出队；消费协议以后统一接入。
-// 登记成功意味着 Buffer 持有本轮责任
+// Accept 给已经出队的 Unit 建执行记录，记下“这些 Pod 现在由它处理”。
+// 不计算节点、不合并 Unit。调用者必须先 Pop；当前代码还不能证明它真的出过队。
 func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -62,7 +58,7 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 		return fmt.Errorf("Accept 缺少 Unit")
 	}
 	key, mode, members := unit.Key(), unit.Mode(), unit.Members()
-	// 身份不完整无法可靠去重；未冻结成员可能在登记后改变，使成员索引失真。
+	// 需要完整编号才能认出重复任务；成员必须固定，否则 owners 会记错由谁处理。
 	if key.ID == "" || key.Group.Namespace == "" || key.Group.Name == "" || key.Group.UID == "" || !unit.Frozen() || len(members) == 0 {
 		return fmt.Errorf("Accept 要求完整身份及非空、已冻结的 Unit")
 	}
@@ -72,15 +68,15 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	names, refs := make(map[string]bool), make(map[workqueue.PodRef]bool)
 	uids := make(map[types.UID]bool)
 	for _, ref := range members {
-		// 不盲信替换的 Unit 实现；重复名称/UID 会造成成员丢失或覆盖。
+		// 同一成员不能出现两次，也不能让两个成员重用同一个名称或 UID。
 		if ref.Name == "" || ref.UID == "" || names[ref.Name] || uids[ref.UID] {
 			return fmt.Errorf("Accept 成员身份不完整或重复")
 		}
 		names[ref.Name], uids[ref.UID], refs[ref] = true, true, true
 	}
 
-	// 已接收请求可在 Pod 已绑定、组已变化后重放：先查本地交接记录，
-	// 不重新执行，也不拿变化后的集群事实推翻已经成功的同一次登记。
+	// 如果同一个 Unit 已经接收过，直接返回，不重建进度。
+	// 即使它现在已经绑定，也不能因为重复调用而覆盖原来的记录。
 	b.mu.RLock()
 	exists, err := b.checkDuplicate(key, mode, refs)
 	b.mu.RUnlock()
@@ -90,8 +86,7 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	state := unit.State()
 	// Fail/Retry 尚未获准执行；不能绕过 Transition 直接塞入缓冲区。
 	if state.Phase != workqueue.UnitQueued || (state.Queue != workqueue.QueueActive && state.Queue != workqueue.QueueFastRetry) {
-		// 同一次交接可能刚被并发 Accept 改为 Processing；等待登记锁后再查一次，
-		// 不把已经成功接收的重复请求误判成非法来源。
+		// 另一个 Accept 可能刚接收了它并改成 Processing，再查一次确认是否只是重复。
 		b.mu.RLock()
 		exists, err := b.checkDuplicate(key, mode, refs)
 		b.mu.RUnlock()
@@ -103,8 +98,8 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if b.views == nil {
 		return fmt.Errorf("Accept 缺少组视图读取器")
 	}
-	// 在锁外读缓存；不持有缓冲区锁调用外部组件。缓存不是跨资源原子快照，
-	// 这里做入场校验，真正执行前仍须复查，不能把 Accept 当作资源预留证明。
+	// 先读当前组和 Pod，确认排队期间没有删除、重建或绑定。
+	// 这里没有预占资源，检查通过也不保证后面一定能调度。
 	view, err := b.views.Get(key.Group.Namespace, key.Group.Name)
 	if err != nil {
 		return fmt.Errorf("Accept 读取组视图: %w", err)
@@ -118,19 +113,18 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// 读缓存期间另一个 Accept 可能已经完成登记；锁内必须再次查重。
+	// 刚才读缓存时，另一个 Accept 也可能接收了同一 Unit，所以在写入前再查一次。
 	if exists, err := b.checkDuplicate(key, mode, refs); exists || err != nil {
 		return err
 	}
 	for otherKey := range b.groups[key.Group] {
 		other := b.records[otherKey]
-		// Atomic 是整组的一轮，不能让两个整组轮次并行；旧轮次存在时
-		// 不擅自判断它过期并删除。旧模式也参与检查，防止修改 CR 绕过旧责任。
+		// Atomic 同时只执行一轮。旧 Atomic 没结束时，改成 Partial 也不能另开一轮。
 		if mode == workqueue.AllTogether || other.Unit.Mode() == workqueue.AllTogether {
 			return fmt.Errorf("Atomic 组仍有未释放单元 %s，不能接收另一轮", otherKey.ID)
 		}
 		for ref := range other.Members {
-			// 同名重建虽 UID 不同，也不能借新 UID 跨过旧成员尚未结清的责任。
+			// 同名新 Pod 先等旧 Pod 的这轮处理结束，避免旧结果影响新任务。
 			if names[ref.Name] {
 				return fmt.Errorf("成员名称 %s 仍由单元 %s 持有", ref.Name, otherKey.ID)
 			}
@@ -142,9 +136,9 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 		}
 	}
 
-	// 所有拒绝条件先检查完，再一次性建立记录与索引
+	// 前面只检查。从这里开始一起登记进度、组内编号和 Pod 处理关系。
 	record := &Record{Unit: unit, Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1, Generation: view.Group.Generation}
-	// 所有拒绝条件通过后登记处理中状态；实际 Pop 仍是调用方交接契约。
+	// 把 Unit 标为正在处理；它是否真的从队列取出，仍由调用者保证。
 	if err := unit.MarkProcessing(); err != nil {
 		return err
 	}
@@ -158,12 +152,13 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	}
 	b.records[key] = record
 	b.groups[key.Group][key] = struct{}{}
+	// 不等下一次 informer 事件，主动通知评估线程检查这个新任务。
 	b.evaluations.Add(key.Group)
 	return nil
 }
 
-// checkDuplicate 在持锁时调用。相同键必须有相同模式和成员集合，成员顺序无关。
-// 不能覆盖既有 Record，否则会丢失在途操作、结果和资源清理责任。
+// checkDuplicate 检查这个 Unit 编号是否已经登记过，调用者先保护好 records 再调用。
+// 已登记且内容相同就算重复；编号相同但模式/成员不同则报错，不能覆盖旧记录。
 func (b *Buffer) checkDuplicate(key workqueue.UnitKey, mode workqueue.SubmitMode, refs map[workqueue.PodRef]bool) (bool, error) {
 	record, ok := b.records[key]
 	if !ok {
@@ -180,8 +175,9 @@ func (b *Buffer) checkDuplicate(key workqueue.UnitKey, mode workqueue.SubmitMode
 	return true, nil
 }
 
+// validateAdmission 检查“这个 Unit 排队之后，原来的组和成员还允许继续执行吗”。
 func validateAdmission(view *group.View, key group.Key, mode workqueue.SubmitMode, refs map[workqueue.PodRef]bool) error {
-	// 同名 CR 重建必须视为新组；删除中的组不再接受新执行责任。
+	// 名称相同但 UID 换了就是另一个组；正在删除的组也不能接新任务。
 	if view == nil || view.Group == nil || view.Group.Namespace != key.Namespace || view.Group.Name != key.Name || view.Group.UID != key.UID || view.Group.DeletionTimestamp != nil {
 		return fmt.Errorf("Accept 组身份已变化或组正在删除")
 	}
@@ -189,7 +185,7 @@ func validateAdmission(view *group.View, key group.Key, mode workqueue.SubmitMod
 	if declared == "" {
 		declared = workqueue.AllTogether
 	}
-	// 不允许靠 Unit 自报 Partial 绕开 CR 的 Atomic 约束。
+	// 组要求 Atomic，Unit 就不能自己改成 Partial。
 	if declared != mode || view.Group.Spec.Members <= 0 {
 		return fmt.Errorf("Accept 单元模式与组声明不符，或组成员数无效")
 	}
@@ -219,6 +215,7 @@ func validateAdmission(view *group.View, key group.Key, mode workqueue.SubmitMod
 	return nil
 }
 
+// ContainsPod 只查 owners：这个 Pod 是否正由 Buffer 中的某个 Unit 处理。
 func (b *Buffer) ContainsPod(key group.Key, uid types.UID) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

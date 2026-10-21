@@ -31,12 +31,13 @@ func isQueue(queue QueueName) bool {
 // TransitionRequest 描述一次迁移意图，不让调用方分别操作源、目标队列。
 // 迁移保持同一个单元身份和成员范围；拆分或产生新一轮单元是另一项操作。
 type TransitionRequest struct {
-	Unit       Unit
-	From       QueueName // 调用方预期的源位置，实现时须核对，不能盲信。
-	To         QueueName
-	Reason     string
-	Message    string
-	WaitingFor string // 保留说明字段；Fail → Retry 的结构化条件由 Fail 原因生成，不盲信此值。
+	ExpectedRevision uint64 // 非零时，在队列管理锁内校验；旧调用方零值暂保留兼容。
+	Unit             Unit
+	From             QueueName // 调用方预期的源位置，实现时须核对，不能盲信。
+	To               QueueName
+	Reason           string
+	Message          string
+	WaitingFor       string // 保留说明字段；Fail → Retry 的结构化条件由 Fail 原因生成，不盲信此值。
 	// RecoveryComplete 由恢复/缓冲区路径明确确认：没有在途或结果未知的绑定，
 	// 需要撤销的预留已清理，且本轮固定成员仍可重试；无须清理也要明确置 true。
 	// 当前是调用方契约，不代表 Transition 已实现实际资源/集群校验。
@@ -85,6 +86,9 @@ func (w *WorkQueue) Transition(request TransitionRequest) error {
 		return fmt.Errorf("迁移请求的失败原因与当前 Fail 记录不匹配")
 	}
 	state := unit.State()
+	if request.ExpectedRevision != 0 && state.Revision != request.ExpectedRevision {
+		return fmt.Errorf("Fail 迁移决策已过期")
+	}
 	if state.Queue != QueueFail || state.Phase != UnitQueued {
 		return fmt.Errorf("Fail 条目与单元状态不一致")
 	}

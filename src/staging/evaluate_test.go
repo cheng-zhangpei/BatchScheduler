@@ -149,7 +149,7 @@ func TestEvaluateUnheldGroupAndChangedDeclaration(t *testing.T) {
 	b, view := fixture(workqueue.AllowPartial)
 	key := view.Members[0].Group
 	ds, err := b.Evaluate(context.Background(), key)
-	if err != nil || len(ds) != 1 || ds[0].Unit != nil || ds[0].Action != ActionReturn {
+	if err != nil || len(ds) != 1 || ds[0].Unit != nil || ds[0].Action != ActionSelect {
 		t.Fatalf("无本地 Unit 时也应建议评估新成员: %+v %v", ds, err)
 	}
 	u := queuedUnit(t, view, "unit", workqueue.AllowPartial, 0)

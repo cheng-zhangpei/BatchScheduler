@@ -8,11 +8,11 @@ import (
 	"batchscheduler/src/group"
 )
 
-// RunEvaluations 启动一个评估 worker，最多立即拉取 batchSize 个已就绪 Group Key。
-// 不等凑满一批，不为每个通知创建 goroutine。同组待处理通知去重；处理期间再次
-// 收到通知，Done 后会重新入队，因此不会因合批丢失最后一次变化。
-// 这里使用 client-go 的处理队列，区别于保存调度 Unit 的业务 workqueue。
-// handle 在锁外接收各组决策；main 经 Apply 分发，实际执行器和交接仍须注入。
+// RunEvaluations 运行一个评估循环：取组编号，读最新信息，Evaluate，再把决定交给 handle。
+// handle 在 main 中就是“逐个调用 Apply”的函数。这里没有自动启动调度执行器。
+// 一批最多取 batchSize 个已经排好的组，不等凑满，也不是并行处理这些组。
+// 同一组排队时通知十次也只排一份；处理期间又有新通知，处理完会再排一次。
+// TODO：同组 Unit 分散进入 Buffer 时，可能分多轮调度；这个 batch 不会自动合并它们。
 func (b *Buffer) RunEvaluations(ctx context.Context, batchSize int, handle func(context.Context, []Decision) error) error {
 	if batchSize <= 0 || handle == nil {
 		return fmt.Errorf("评估 worker 需要正数批量上限及决策处理器")
@@ -28,6 +28,7 @@ func (b *Buffer) RunEvaluations(ctx context.Context, batchSize int, handle func(
 	defer close(stopped)
 	defer b.evaluations.ShutDown()
 	go func() {
+		// 退出时关闭通知队列，让正在 Get 中等待的评估线程醒来并退出。
 		select {
 		case <-ctx.Done():
 			b.evaluations.ShutDown()
@@ -40,7 +41,7 @@ func (b *Buffer) RunEvaluations(ctx context.Context, batchSize int, handle func(
 			return nil
 		}
 		batch := []group.Key{key}
-		// 只有本 worker 消费，Len>0 后 Get 不会被另一个消费者抢空。
+		// 只有这一个线程取通知，所以看到还有通知就能继续取，不会被别人抢空。
 		for len(batch) < batchSize && b.evaluations.Len() > 0 {
 			next, quit := b.evaluations.Get()
 			if quit {
@@ -55,13 +56,14 @@ func (b *Buffer) RunEvaluations(ctx context.Context, batchSize int, handle func(
 	return nil
 }
 
+// evaluateOne 处理一个组的通知，处理完必须 Done，让队列知道这次检查已结束。
 func (b *Buffer) evaluateOne(ctx context.Context, key group.Key, handle func(context.Context, []Decision) error) {
 	defer b.evaluations.Done(key)
 	if ctx.Err() != nil {
 		return
 	}
-	// worker 重读一次当前事实，使 Accept 之后无新 Watch 事件也能进行首轮评估。
-	// 此次刷新不再次通知自身，否则会形成 Observe → 评估 → Observe 的空转循环。
+	// Accept 后可能没有新的 informer 事件，所以评估前主动读一次缓存。
+	// false 表示这次读取不再给自己排通知，避免没变化也不停检查。
 	err := b.observe(ctx, Observation{Group: key}, false)
 	if err == nil {
 		var decisions []Decision
@@ -71,8 +73,8 @@ func (b *Buffer) evaluateOne(ctx context.Context, key group.Key, handle func(con
 		}
 	}
 	if err != nil && ctx.Err() == nil {
-		// 本步只有通知去重，没有错误退避定时器；保留错误日志，后续通知可重评。
-		// 不立即把错误 Key 无限 Add 回去，避免缓存/处理器异常时形成忙循环。
+		// 本函数出错后只记日志，不马上无限重试。下一次事件才能让普通 Record 再检查。
+		// Fail/Retry 另外有 RunQueueChecks 定时通知；它不是所有 Record 的错误重试器。
 		slog.Error("组评估失败，等待后续通知重新评估", "group", key, "error", err)
 	}
 }

@@ -1,6 +1,37 @@
 # BatchScheduler 架构与进度
 
-更新日期：2026-10-20。以当前代码和本次讨论为准，不使用百分比估算完成度。
+更新日期：2026-10-21。以当前代码和本次讨论为准，不使用百分比估算完成度。
+
+### 2026-10-21 收工位置 / 明天回来先看这里
+
+今晚先读代码，不继续扩展功能。明天询问昨天进度时，先复盘下面的 Evaluate 阶段与缺口；
+每次只走一个阶段、一个 Unit，不把“接口已接线”说成“真实执行已完成”。
+
+| Evaluate 阶段 | 当前做到哪里 | 下一步需要确认什么 |
+| --- | --- | --- |
+| 预处理 | 在途等待、观察不足、本轮声明/成员失效检查；只生成决策 | 超时确认及完整生命周期异常尚未实现 |
+| 报喜 | 成员已绑定且责任结清则生成 Release；不在评估里删记录 | 真实清理仍需 Handoff 解除队列侧旧归属 |
+| 报忧：Center 中的 Unit | 错误引擎集中入口，case 分类到 handler；Observe 已匹配 Unschedulable、SchedulerError、SchedulingGated 三种标准原生原因；已有错误先恢复、再回 Fail | 其他原生原因、API 请求错误及错误属于哪一轮的完整判断仍需补；各类错误策略还需逐项细化 |
+| 报忧：Fail/Retry 中的 Unit | 读取队列快照，按错误、恢复确认和唤醒条件生成 Transition；Apply 已调用真实迁移 | 回送者必须明确确认 RecoveryComplete，不能仅因任务在 Fail 就准许重试 |
+| 正常推进 | 生成 Schedule → Assume → Bind 阶段决策 | **真实执行器未实现/注入**；Report 的阶段推进仅在模拟执行下验证 |
+
+详细说明见 [Buffer 源码阅读说明](docs/buffer.md)，逐个解释字段、函数、Handoff 和未完成项。
+
+阅读顺序：`src/staging/decision_engine.go` 的阶段入口 → `src/staging/error_engine/` 的错误 handler
+→ `src/staging/apply_decision.go` 的动作分发。`Evaluate` 不修改 Buffer，Apply/Report 等入口负责更新。
+
+本日额外接通：Transition 队列版本检查；低频时钟、节点变化及已绑定 Pod 删除的重试通知。
+测试无需手写 Decision，已验证评估器自动生成并执行 Fail → Retry → Active；不相关事件、
+未恢复、权限/声明错误及绑定未知不自动重试。`go test ./src/... -count=1` 全部通过。
+调度门移除已产生 DependencyChanged；其他 DependencyNotReady 依赖资源的 informer 尚未接入，没有做真实集群验证。
+
+后续协作方式：一次一个函数、一个决策，由用户主导行为和取舍，再讨论实现；不再整段放权扩写。
+本日后半段重点整理直白注释与源码文档；另外按用户明确要求补上 Observe → 内部错误 → Evaluate/error_engine 的三种标准原因映射。
+
+**仍未接入的不是所有 handler：Select、Transition 已接通；Execute 真实执行器、Handoff
+真实回送/归属解除适配器，以及 Active.Pop → Accept 消费主循环仍未完成。**
+
+以下 2026-10-20 收工记录和模块表保留为上一检查点；本节描述优先。
 
 **整体调度流程尚未打通。Center 的 Accept / Observe / Evaluate / Apply / Report / Release 已实现，模拟执行器验证了正常释放和失败恢复回送闭环。main 已接观察、评估、Apply 及新成员 Select；真实执行器、队列侧交接适配器、Active 消费主循环、资源预留和绑定仍未完成。**
 

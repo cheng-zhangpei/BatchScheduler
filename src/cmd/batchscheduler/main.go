@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"time"
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/informer"
@@ -54,6 +55,15 @@ func run() error {
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
 	center := staging.NewBuffer(observed.GroupViews, staging.Handlers{
+		// 把 WorkQueue 的两个查询函数交给 Buffer，评估时才能看到 Fail/Retry 的任务。
+		QueueSnapshot: queues.GroupSnapshot,
+		WaitingGroups: queues.WaitingGroups,
+		Transition: func(ctx context.Context, request workqueue.TransitionRequest) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return queues.Transition(request)
+		},
 		SelectGroup: func(_ context.Context, view *group.View) error {
 			if !utils.ShouldEnqueue(view) {
 				return nil
@@ -64,19 +74,21 @@ func run() error {
 			}
 			return queues.Select(workqueue.SelectRequest{View: view, Nodes: nodes})
 		},
-		// Execute 和 Handoff 待实际执行器及 workqueue 交接适配器实现后注入。
-		// 缺少适配器时 Apply 返回明确错误并保留原记录，不模拟调度或清理成功。
+		// Execute 还没实现：目前没有真实算节点、预占、绑定的代码。
+		// Handoff 还没实现：目前不能真正解除旧队列关联并把失败成员组织成下一轮。
+		// 这些字段为空时 Apply 返回错误，不会假装已经执行或清理成功。
 	})
 	queues.Staging = center
-	// 观察路径与 Active 出队接收路径并行；先接 Observe，Accept 消费循环后续实现。
-	// 回调发生时该 informer 的缓存已更新。Observe 只重查本地 Store 并登记事实，
-	// 不等待初始全量同步，也不执行调度或队列迁移；两种资源的后续事件会继续校正。
+	if err := observed.OnRetryChange(center.NotifyRetry); err != nil {
+		return err
+	}
+	// informer 看见组/Pod 变化，就让 Observe 更新记录并通知评估。
+	// Active.Pop → Accept 是另一条路径，目前还没有启动它的消费循环。
 	if err := observed.OnGroupChange(func(key group.Key) {
 		if err := center.Observe(ctx, staging.Observation{Group: key}); err != nil && ctx.Err() == nil {
 			slog.Error("更新调度中心观察失败", "namespace", key.Namespace, "group", key.Name, "error", err)
 		}
-		// Observe 只更新事实并提交去重 Key；评估由下面独立 worker 并发运行，
-		// 不在 informer 回调里执行 Evaluate/Apply，避免阻塞观察路径。
+		// 这里只读缓存、更新观察；Evaluate/Apply 留给下面单独的评估线程。
 	}); err != nil {
 		return err
 	}
@@ -92,11 +104,19 @@ func run() error {
 	case <-ready:
 	}
 	// 缓存就绪后才启动评估，避免把初始跨资源 List 顺序当作任务异常。
+	queueChecksDone := make(chan struct{})
+	// 一个定时线程，每秒通知检查 Fail/Retry，让退避时间到后能继续推进。
+	go func() {
+		defer close(queueChecksDone)
+		center.RunQueueChecks(ctx, time.Second)
+	}()
 	evaluationDone := make(chan error, 1)
+	// 这个线程消费组通知。32 是每批最多取多少个组，不是每次调度多少个 Unit。
 	go func() {
 		evaluationDone <- center.RunEvaluations(ctx, 32, func(ctx context.Context, decisions []staging.Decision) error {
 			var failures []error
 			for _, decision := range decisions {
+				// 依次执行本组的决定；真实执行器需要自己安排耗时工作，别堵住其他组。
 				if err := center.Apply(ctx, decision); err != nil {
 					switch {
 					case errors.Is(err, staging.ErrHandlerUnavailable):
@@ -115,6 +135,7 @@ func run() error {
 	}()
 	defer func() {
 		stop()
+		<-queueChecksDone
 		if err := <-evaluationDone; err != nil {
 			slog.Error("评估 worker 退出", "error", err)
 		}

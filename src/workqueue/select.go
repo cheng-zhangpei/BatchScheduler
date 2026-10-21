@@ -50,10 +50,11 @@ type SelectionInput struct {
 // QueueDecision 可以指向四个队列中的任意一个；QueueNone 表示暂不入队。
 // Fail 需给出错误，Retry 需给出等待条件，FastRetry 的准入留待单独讨论。
 type QueueDecision struct {
-	To         QueueName
-	Reason     string
-	Message    string
-	WaitingFor string
+	RecoveryComplete bool // 仅 Fail 使用：已恢复或明确没有执行过任何资源操作。
+	To               QueueName
+	Reason           string
+	Message          string
+	WaitingFor       string
 }
 
 type SelectionPolicy func(SelectionInput, Unit) (QueueDecision, error)
@@ -170,7 +171,7 @@ func (w *WorkQueue) selectView(view *group.View, nodes []*corev1.Node, pod *core
 		case QueueActive:
 			w.Active.Add(unit)
 		case QueueFail:
-			w.Fail.Put(Failure{Unit: unit, Reason: decision.Reason, Message: decision.Message})
+			w.Fail.Put(Failure{Unit: unit, Reason: decision.Reason, Message: decision.Message, RecoveryComplete: decision.RecoveryComplete})
 		case QueueRetry:
 			w.Retry.Put(Retry{Unit: unit, WaitingFor: decision.WaitingFor})
 		case QueueFastRetry:
