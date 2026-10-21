@@ -1,62 +1,198 @@
 # BatchScheduler
 
-参考 Kubernetes 调度器结构，从零实现以 Group 为单位的调度核心。每次只推进一个小目标。
+A group-oriented Kubernetes scheduler built in Go, with explicit scheduling units, observable execution state, and condition-based retries.
 
-**整体调度流程尚未打通。Center 已实现动作分发、反馈及交接确认后的释放，模拟闭环通过；真实执行器、队列交接适配器、实际调度、Assume / Forget 和绑定仍未完成。** 架构边界、模块进度、测试范围与后续安排见[项目进度表](progress.md)。
+BatchScheduler is being developed as a standalone scheduler inspired by the Kubernetes scheduling architecture. It explores how groups of related Pods can be admitted, tracked, and recovered together while supporting smaller scheduling units where partial progress is appropriate.
 
-逐函数阅读 Buffer 请从 [Buffer 源码阅读说明](docs/buffer.md) 开始：数据结构、每阶段怎样判断、Apply/Report、Handoff 到底清什么，以及当前未完成的部分均按源码说明。
+**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. The runtime does not yet perform node placement or bind Pods. Real execution, resource reservation, and execution-to-queue handoff remain under development.
 
-当前已建立 PodGroup CR、Pod 成员视图及关联。`src/workqueue/` 保留 `Unit` 接口及一个默认实现，同一个单元从组装走向冻结；四个队列均以 Unit 存取。main 在初始同步后调用 `Select(SelectRequest{View: view, Nodes: nodes})`，查询 Pod 归属、复用或创建单元，并登记组内关系。默认策略为 Atomic 整组齐备后进 Active，Partial 按单 Pod 入 Active，已确认的内部异常进 Fail，绑定结果待确定时不入队。Select 直接首次入队；队列间迁移由 Transition 管理，已实现 Fail → Retry 及显式提示驱动的 Retry → Active。
+## Project Goals
 
-`src/workqueue/transition.go` 已实现 Fail → Retry：校验失败分类、恢复确认、当前归属及成员状态，保存结构化重试计划；相同请求重放不会重置退避时间。`retry_policy.go` 列出可重试类型及等待条件。Evaluate 已读取 Fail/Retry 快照并生成迁移决策，Apply 调用真实 Transition；main 已接定时检查、节点变化、已绑定 Pod 删除和调度门移除的提示。其他依赖资源监听仍待实现，FastRetry 不参与本阶段迁移。缓冲区失败回送还依赖未实现的真实 Handoff，不走 Active → Fail。
+- **Coordinate related workloads.** Give related Pods a shared scheduling context and group-level progress tracking.
+- **Support different submission modes.** Model whole-group and partial submission through a common scheduling-unit interface.
+- **Make execution state explicit.** Track scheduling progress separately from the state observed in the Kubernetes API.
+- **Recover through defined transitions.** Classify failures, confirm recovery, and retry when a relevant condition changes or a backoff expires.
+- **Keep decisions separate from effects.** Evaluate state to produce decisions, then apply those decisions through dedicated queue and execution interfaces.
+- **Maintain a readable implementation.** Keep observation, queue management, decision rules, and execution stages independently understandable and testable.
 
-`src/staging/` 提供 Accept / Observe / Evaluate / Apply / Report / Release。Observe 已将三种标准 Pod 调度原因匹配为内部错误，Evaluate 分阶段生成决定，再由 Apply 调用具体函数；Report 记录执行器结果。main 已接 Observe → 评估线程 → Apply → Select/Transition。真实 Execute/Handoff 未接入，因此当前程序不能完成实际调度、绑定和失败回送。未知操作结果保留等待标记，不假装完成。
+## Core Concepts
 
-首次入队统一通过 `Select(SelectRequest)`，只处理有 PodGroup 归属的成员。Atomic 的 Pod 来源提升为组级，Partial 保留 Pod 粒度；`StagingLookup` 查询哪些 Pod 已进入 Buffer，避免重复组装。Active.Pop → Accept、资源缓存与 Assume / Forget、调度算法、绑定、operator 尚未实现。compaction、FastRetry 严格准入和 Agent 接入继续后置。
+### PodGroup
 
-2026-10-20 收工：模拟执行器已验证正常释放和失败恢复回送；明天先复盘每个环节的权衡，再逐个接真实执行器与队列交接。最近 `go test ./src/... -count=1` 全部通过，尚未测试真实集群。
+`PodGroup` is a namespaced custom resource in `scheduling.batchscheduler.io/v1alpha1`. It declares the expected number of members and their submission mode.
 
-```text
-go.mod                         Go 模块，依赖 client-go 基础库
-src/
-  cmd/batchscheduler/main.go    配置与启动入口
-  informer/                    Pod/Node/PodGroup 观察、缓存同步、事件回调
-  apis/scheduling/v1alpha1/     PodGroup 的 Go 数据定义
-  group/view.go                Pod 成员关联、索引和组视图
-  group/state.go               组与 Pod 的内部状态定义
-  workqueue/                   Unit、四个队列、Select / Policy、Transition 及测试
-  staging/                     Center 接收、观察、评估、动作分发、反馈及交接确认后释放
-config/crd/                    PodGroup CRD
-upstream/                      上游源码阅读材料
+```yaml
+apiVersion: scheduling.batchscheduler.io/v1alpha1
+kind: PodGroup
+metadata:
+  name: training-workers
+  namespace: default
+spec:
+  members: 4
+  submitMode: AllTogether
 ```
 
-Go 模块放在仓库根目录，源码放在 `src`，便于从根目录执行命令。
+The supported modes are:
 
-## 当前运行方式
+| Mode | Scheduling intent | Current unit assembly |
+| --- | --- | --- |
+| `AllTogether` | Admit the complete declared group as one scheduling unit | Wait for all expected members before initial admission |
+| `AllowPartial` | Allow members to make progress independently | Assemble one unit per Pod by default |
 
-需要 Go 1.24 或以上，以及可访问虚拟机集群的 kubeconfig。当前依赖固定为 client-go v0.34.7，真实集群版本还需要确认。
+`AllTogether` currently defines admission and recovery scope. Transactional group binding is not implemented.
+
+Member Pods are identified by a controller `ownerReference` pointing directly to the PodGroup, with the matching API version, kind, name, and UID. Pods must belong to the same namespace. Standalone Pods are outside the scheduling scope.
+
+Creating a PodGroup does not create its Pods. A workload operator is planned to manage member creation and workload lifecycle. See [PodGroup and member views](docs/podgroup-view.md) for the association rules.
+
+### Scheduling Unit
+
+A scheduling unit represents the set of Pods handled in one attempt. A group can have multiple units, particularly in partial-submission mode.
+
+Units can collect members during assembly. Membership is frozen before admission to a queue and remains fixed during execution and retry. A changed member set requires a new unit.
+
+### Work Queues
+
+| Queue | Purpose |
+| --- | --- |
+| `Active` | Units eligible for a scheduling attempt |
+| `Fail` | Confirmed failures awaiting recovery confirmation or retry classification |
+| `Retry` | Units waiting for a relevant event, a backoff deadline, or both |
+| `FastRetry` | Reserved channel for narrowly admitted priority retries; admission policy is not implemented |
+
+`Select` assembles units and performs initial admission. `Transition` manages movement between existing queues: `Fail → Retry` and `Retry → Active`.
+
+Failures returned from execution require a separate handoff to the queue. An `Active → Fail` transition is not part of the queue migration model.
+
+## Architecture
+
+The implementation separates Kubernetes observations, scheduler decisions, and execution effects.
+
+| Component | Responsibility |
+| --- | --- |
+| Informers | Watch Pods, Nodes, and PodGroups and maintain local caches |
+| Group store | Associate PodGroups with member Pods and assemble query views |
+| WorkQueue | Assemble units, track queue membership, and enforce retry transitions |
+| Buffer / Center | Track units being processed and combine execution progress with cluster observations |
+| Decision engine | Evaluate completion, failures, and normal execution progress |
+| Error engine | Map supported Pod scheduling conditions to internal failures and dispatch error-specific handlers |
+| Apply | Route decisions to selection, queue transitions, execution, or handoff functions |
+| Executors | Perform placement, reservation, binding, and recovery; real implementations are pending |
+
+The Center has two independent inputs:
+
+- **`Accept`** receives a unit selected for execution and creates its attempt record.
+- **`Observe`** refreshes cluster facts from the informer caches, including changes that arrive before a local unit exists.
+
+`Report` provides a third input for results from scheduler-initiated operations. It identifies the operation being reported and advances the internal execution state.
+
+Evaluation uses a separate queue of group keys. Repeated notifications for a group are coalesced, and a worker evaluates the group's current state. This notification queue is distinct from the queues that hold scheduling units.
+
+`Evaluate` produces decisions without modifying execution records or moving queue entries. `Apply` checks and dispatches those decisions. Attempt records are removed only after the required execution and queue-side cleanup has been confirmed.
+
+## Implementation Status
+
+### Implemented
+
+- Typed Pod and Node informers, a dynamic PodGroup informer, and initial cache synchronization.
+- UID-aware group membership and member indexes.
+- Scheduling-unit assembly, frozen membership, and lifecycle tracking.
+- Initial queue selection for whole-group and partial submission.
+- Active/FastRetry FIFO storage and keyed Fail/Retry storage.
+- Center acceptance, observation, staged evaluation, action dispatch, and execution feedback.
+- Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
+- Version-checked queue transitions with retry classification and event/backoff conditions.
+- Retry notifications from node changes, bound-Pod deletion, scheduling-gate removal, and periodic queue checks.
+- Unit and fake-client integration tests for observation, decision generation, queue migration, and simulated execution.
+
+### In Progress / Planned
+
+- Active/FastRetry consumption and reliable transfer into the Center.
+- Node-placement algorithms and group-aware resource planning.
+- A scheduling resource cache with Assume/Forget semantics.
+- Real binding and recovery executors.
+- Queue-side handoff, old-unit cleanup, and creation of subsequent attempts.
+- Broader failure mapping, operation timeout reconciliation, and restart recovery.
+- Buffer capacity controls, fairness, compaction, and FastRetry admission.
+- A workload operator and validation against a live cluster.
+
+The current tests establish behavior within their covered paths. They do not establish production readiness, live-cluster scheduling correctness, or performance characteristics.
+
+## Getting Started
+
+### Prerequisites
+
+- Go **1.24 or newer**.
+- A reachable Kubernetes API server and a valid kubeconfig.
+- `kubectl` to install the PodGroup CRD.
+- Permissions to list and watch Pods, Nodes, and PodGroups across the namespaces observed by the process.
+
+Kubernetes Go dependencies are pinned to **v0.34.7** in [go.mod](go.mod). A supported cluster-version matrix has not yet been established.
+
+### Clone and Test
 
 ```sh
-go run ./src/cmd/batchscheduler --kubeconfig /path/to/config
+git clone https://github.com/cheng-zhangpei/BatchScheduler.git
+cd BatchScheduler
+go test ./src/... -count=1
 ```
 
-也支持 client-go 默认的 `KUBECONFIG` 和 `~/.kube/config` 加载规则。程序只读取全 namespace 的 Pod、Node 和本项目的 PodGroup，需要相应的 list/watch 权限；不会创建或绑定 Pod。连接地址、证书和凭据需适用于运行程序的机器。
+The test suite uses in-memory fixtures and fake Kubernetes clients; it does not require a running cluster.
 
-连接集群前，需先由管理员安装本项目 CRD：
+### Run the Current Prototype
+
+Install the custom resource definition:
 
 ```sh
 kubectl apply -f config/crd/scheduling.batchscheduler.io_podgroups.yaml
 ```
 
-本次只准备了文件，未执行该命令。PodGroup API 为 `scheduling.batchscheduler.io/v1alpha1`，与上游同名 CR 分开。
+Start the process:
 
-启动后先等待三个 informer 的初始缓存同步，再通过 lister 打印对象数量，随后保持观察。按 Ctrl+C 停止；CRD 未安装、连接或权限有问题时，client-go 输出错误并重试，可以取消退出。对象数量只是观察验证，不能作为一致的调度资源快照。
+```sh
+go run ./src/cmd/batchscheduler --kubeconfig /path/to/kubeconfig
+```
 
-## 本步阅读顺序
+The process also supports the standard `KUBECONFIG` environment variable and default kubeconfig discovery.
 
-1. 入口如何创建 client 并调用 `informer.New`。
-2. factory 如何创建 Pod/Node informer，为什么必须在启动前实例化。
-3. `Start` 与 `WaitForCacheSync` 分别负责什么。
-4. lister 为什么从缓存读取，为什么返回对象不能直接修改。
+At startup, it synchronizes the Pod, Node, and PodGroup caches, logs resource counts, and evaluates observed groups for initial admission. It continues processing observation and retry notifications until interrupted.
 
-组关系的阅读入口见 [PodGroup 与 Pod 视图](docs/podgroup-view.md)。Select 已接初始视图首次入队；后续 Pod/Group 事件经 Observe/Evaluate/Apply 再检查 Select。关联索引由 informer 的 Indexer 自动维护。informer 对象缓存与未来用于资源记账的调度缓存是不同职责。
+**Running this prototype does not schedule or bind Pods.** The real execution and handoff functions are not registered, and there is no Active-queue consumer yet. The current runtime reads cluster resources and updates its own in-memory state.
+
+### Build
+
+```sh
+go build ./src/cmd/batchscheduler
+```
+
+## Repository Layout
+
+```text
+src/
+  apis/scheduling/v1alpha1/   PodGroup API definitions
+  cmd/batchscheduler/        Application entry point and component wiring
+  group/                     Group views, member indexes, and internal states
+  informer/                  Resource caches and change notifications
+  staging/                   Attempt records, evaluation, dispatch, and feedback
+    error_engine/            Observed-error mapping and failure handlers
+  utils/                     Admission helpers
+  workqueue/                 Scheduling units, queues, selection, and transitions
+config/crd/                  PodGroup custom resource definition
+docs/                        Architecture and source-level documentation
+progress.md                  Detailed implementation checkpoints
+```
+
+## Documentation
+
+- [Buffer: source-level design and tradeoffs](docs/buffer.md) — records, evaluation stages, execution feedback, handoff, and known gaps.
+- [PodGroup and Pod views](docs/podgroup-view.md) — resource relationships and member lookup.
+- [Architecture and implementation progress](progress.md) — current checkpoints and validation boundaries.
+- [Project background and requirements](批任务组调度与失败恢复调度器-背景与需求说明书.md) — project scope and design background.
+
+The detailed design documents and most source comments are currently written in Chinese. Historical checkpoints describe the implementation at the time they were recorded; the latest checkpoint takes precedence.
+
+## Contributing
+
+The project is evolving, and its APIs and execution contracts are subject to change. For architectural changes, discuss the intended behavior and scope in an issue before starting a large implementation.
+
+Keep changes focused, explain state transitions and failure behavior, and include tests where behavior changes. Separate decision rules from side effects, and document any integration that remains incomplete.
