@@ -51,7 +51,7 @@ func DefaultPolicy(input SelectionInput, unit Unit) (QueueDecision, error) {
 		}
 	}
 	// 先处理已确认异常，再考虑普通调度机会。
-	// Atomic 使用组级失败范围；Partial 的默认单元只有一个 Pod。
+	// Atomic 使用组级失败范围；Partial 可以批量包含多个成员。
 	if unit.Mode() == AllTogether && input.GroupState.LastFailure != nil {
 		failure := input.GroupState.LastFailure
 		return QueueDecision{To: QueueFail, Reason: failure.Reason, Message: failure.Message}, nil

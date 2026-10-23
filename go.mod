@@ -5,7 +5,37 @@ go 1.24.0
 require (
 	k8s.io/api v0.34.7
 	k8s.io/apimachinery v0.34.7
+	k8s.io/apiserver v0.34.7
 	k8s.io/client-go v0.34.7
+	k8s.io/kube-scheduler v0.34.7
+	k8s.io/kubernetes v1.34.7
+)
+
+require (
+	cel.dev/expr v0.24.0 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/blang/semver/v4 v4.0.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/google/cel-go v0.26.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/prometheus/client_golang v1.22.0 // indirect
+	github.com/prometheus/client_model v0.6.1 // indirect
+	github.com/prometheus/common v0.62.0 // indirect
+	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/spf13/cobra v1.9.1 // indirect
+	github.com/stoewer/go-strcase v1.3.0 // indirect
+	go.opentelemetry.io/otel v1.41.0 // indirect
+	go.opentelemetry.io/otel/trace v1.41.0 // indirect
+	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
+	golang.org/x/sync v0.12.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250303144028-a0af3efb3deb // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
+	k8s.io/apiextensions-apiserver v0.34.7 // indirect
+	k8s.io/component-base v0.34.7 // indirect
+	k8s.io/component-helpers v0.34.7 // indirect
+	k8s.io/controller-manager v0.34.7 // indirect
+	k8s.io/dynamic-resource-allocation v0.34.7 // indirect
 )
 
 require (
@@ -50,3 +80,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace k8s.io/kubernetes => ./third_party/kubernetes

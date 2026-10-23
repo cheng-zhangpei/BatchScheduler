@@ -16,29 +16,53 @@ type Observation struct {
 	View  *group.View
 }
 
-// Operation 表示让执行器做哪件事：算节点、预占资源、绑定、恢复。
+// Operation 只表示启动整轮执行，或处理执行之外发现的旧轮次恢复。
+// Assume、Bind 是 Executor 内部步骤，不再由 Buffer 单独派发。
 type Operation string
 
 const (
-	ActionSelect      Action    = "Select"     // 组织未被 Center 持有的成员，交给首次入队入口。
-	ActionTransition  Action    = "Transition" // 对队列持有的 Unit 执行迁移，不借用 Center 的 Record。
-	OperationSchedule Operation = "Schedule"
-	OperationAssume   Operation = "Assume"
-	OperationBind     Operation = "Bind"
-	OperationRecover  Operation = "Recover"
+	ActionSelect     Action    = "Select"     // 组织未被 Center 持有的成员，交给首次入队入口。
+	ActionTransition Action    = "Transition" // 对队列持有的 Unit 执行迁移，不借用 Center 的 Record。
+	OperationRun     Operation = "Run"
+	OperationRecover Operation = "Recover"
 )
 
-// Feedback 是执行器返回的结果，例如“action-3 这次绑定成功了”。
-// 当前必须汇总整个操作再上报（Pod=nil），一个成员成功不能代表整个操作成功。
-// Unknown=true 表示还不知道成败；Unknown=false 且 Failure=nil 才表示这个操作成功。
+type FeedbackKind string
+
+const (
+	FeedbackProgress FeedbackKind = "Progress" // 进展：更新记录，保留本次 Pending。
+	FeedbackFinished FeedbackKind = "Finished" // 整轮完成：成功绑定，或失败后已恢复并结清。
+	FeedbackUnknown  FeedbackKind = "Unknown"  // 绑定或恢复结果未知，继续保留 Pending。
+	FeedbackBlocked  FeedbackKind = "Blocked"  // 停在尚未实现的步骤，不自动重新启动。
+)
+
+// ExecutionPhase 是执行器报告的实际进度，不是让 Buffer 派发下一步的命令。
+type ExecutionPhase string
+
+const (
+	PhaseFiltering  ExecutionPhase = "Filtering"
+	PhaseFiltered   ExecutionPhase = "Filtered"
+	PhaseScored     ExecutionPhase = "Scored"
+	PhasePlanned    ExecutionPhase = "Planned"
+	PhaseAssumed    ExecutionPhase = "Assumed"
+	PhaseBinding    ExecutionPhase = "Binding"
+	PhaseBound      ExecutionPhase = "Bound"
+	PhaseRecovering ExecutionPhase = "Recovering"
+	PhaseRecovered  ExecutionPhase = "Recovered"
+)
+
+// Feedback 是同一次执行的持续报告，ActionID 从开始到结束保持不变。
+// Kind 区分进展与结束；Phase 说明执行器已经做到哪里。这里仍按整个操作汇总，Pod 必须为 nil。
 type Feedback struct {
 	Unit                    workqueue.UnitKey
 	ActionID                string
 	Operation               Operation
+	Kind                    FeedbackKind
+	Phase                   ExecutionPhase
+	Message                 string
 	Pod                     *workqueue.PodRef
-	Unknown                 bool
 	Failure                 *group.FailureInfo
-	Plan                    map[workqueue.PodRef]string // Schedule 成功时提交完整成员 → 节点计划。
+	Plan                    map[workqueue.PodRef]string // Planned 时提交完整成员 → 节点计划。
 	ResponsibilitiesSettled bool                        // Bind/Recover 已收尾：没有还在跑的请求，资源预占也已释放或转成正式占用。
 }
 
@@ -82,9 +106,10 @@ type Record struct {
 	Failure                 *group.FailureInfo
 	RecoveryComplete        bool                        // 执行器已确认必要的恢复步骤完成，不是靠 Observe 猜出来的。
 	ResponsibilitiesSettled bool                        // 执行请求和资源预占都已收尾；它为 true 才可能删除本轮记录。
-	NextOperation           Operation                   // 上一步成功后，下一步准备做什么。
+	ExecutionPhase          ExecutionPhase              // 只记录执行进展，不再保存或派发 NextOperation。
+	ExecutionBlocked        bool                        // 代码停在待实现步骤；不能因评估通知重新执行整轮。
 	Plan                    map[workqueue.PodRef]string // 调度算法算出的 Pod → Node 计划。
-	PendingOperation        Operation                   // 正在等待的具体操作，例如 Bind。
+	PendingOperation        Operation                   // 正在等待的整轮请求：Run 或 Recover。
 	PendingDecision         Action                      // 正在等待的动作类型，例如 Execute 或 Return。
 	LastFeedback            *Feedback                   // 只记住最近一次结果；相同结果再发来时不重复处理。
 }

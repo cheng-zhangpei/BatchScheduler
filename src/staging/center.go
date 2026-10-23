@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// Center 列出 Buffer 对外提供的方法；具体实现是 Buffer。
+// Center 列出缓冲区对外提供的方法；具体实现是 buffer 包中的 Buffer。
 type Center interface {
 	// Accept 接收已经出队的 Unit：建一份执行记录，记住哪些 Pod 正由它处理。
 	// 同一个 Unit 重复送来时不重复建记录。这里不计算节点，也不绑定。

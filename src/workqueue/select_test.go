@@ -95,8 +95,8 @@ func TestSelectRoutesBySourceAndMode(t *testing.T) {
 	}{
 		{"atomic/group", AllTogether, false, 1, 3, GroupScope},
 		{"atomic/pod", AllTogether, true, 1, 3, GroupScope},
-		{"partial/group", AllowPartial, false, 3, 1, GroupScope},
-		{"partial/pod", AllowPartial, true, 1, 1, PodScope},
+		{"partial/group", AllowPartial, false, 1, 3, GroupScope},
+		{"partial/pod", AllowPartial, true, 1, 3, PodScope},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := testView("work", "job", tc.mode, 3, 3)
@@ -154,6 +154,51 @@ func TestSelectPartialDoesNotWaitForWholeGroup(t *testing.T) {
 	w := queueFor(view)
 	selectOK(t, w, SelectRequest{Pod: view.Members[0].Pod})
 	drainActive(t, w, 1)
+}
+
+func TestPartialAssemblyBatchesFreeMembersAndKeepsFrozenUnit(t *testing.T) {
+	full := testView("work", "batch", AllowPartial, 6, 5)
+	first := *full
+	first.Members = full.Members[:3]
+	w := queueFor(&first)
+	// Buffer 正在处理第一个成员，本轮只能组装剩下两个。
+	w.Staging = testStaging{key: full.Members[0].Group, uid: full.Members[0].Pod.UID}
+	selectOK(t, w, SelectRequest{Pod: first.Members[1].Pod})
+	u := drainActive(t, w, 1)[0]
+	if len(u.Members()) != 2 {
+		t.Fatalf("应批量组装两个空闲成员: %+v", u.Members())
+	}
+	w.Views = testViews{"work/batch": full}
+	selectOK(t, w, SelectRequest{Pod: full.Members[3].Pod})
+	next := drainActive(t, w, 1)[0]
+	if len(u.Members()) != 2 || next.Key() == u.Key() || len(next.Members()) != 2 {
+		t.Fatal("新成员应另成一批，不能改变已经冻结的旧 Unit")
+	}
+	for _, ref := range append(u.Members(), next.Members()...) {
+		if ref.UID == full.Members[0].Pod.UID {
+			t.Fatal("重复接收了 Buffer 中的成员")
+		}
+	}
+}
+
+func TestPartialAssemblyReusesUnfrozenUnit(t *testing.T) {
+	full := testView("work", "growing", AllowPartial, 10, 4)
+	first := *full
+	first.Members = full.Members[:1]
+	w := queueFor(&first)
+	w.Policy = nil
+	selectOK(t, w, SelectRequest{View: &first})
+	record := w.groups[full.Members[0].Group]
+	id := record.pods[full.Members[0].Pod.UID].UnitID
+	selectOK(t, w, SelectRequest{View: full})
+	if len(record.units) != 1 || len(record.units[id].Members()) != 4 {
+		t.Fatal("未冻结的 Partial 应能继续收集同组成员")
+	}
+	w.Policy = DefaultPolicy
+	selectOK(t, w, SelectRequest{View: full})
+	if got := drainActive(t, w, 1)[0]; got.Key().ID != id {
+		t.Fatal("不应另建单元")
+	}
 }
 
 func TestSelectReplacesRecreatedPodBeforeFreeze(t *testing.T) {
@@ -249,7 +294,7 @@ func TestSelectDoesNotScheduleBoundTerminalOrDeletingPods(t *testing.T) {
 	}
 }
 
-func TestSelectConfirmedFailureUsesModeGranularity(t *testing.T) {
+func TestSelectRoutesAssembledUnitFailureToFail(t *testing.T) {
 	for _, mode := range []SubmitMode{AllTogether, AllowPartial} {
 		t.Run(string(mode), func(t *testing.T) {
 			view := testView("work", "job", mode, 3, 3)
@@ -265,15 +310,35 @@ func TestSelectConfirmedFailureUsesModeGranularity(t *testing.T) {
 			if !ok || failure.Reason != "SchedulingFailed" {
 				t.Fatal("已确认异常未进入 Fail")
 			}
-			wantMembers, wantActive := 3, 0
-			if mode == AllowPartial {
-				wantMembers, wantActive = 1, 2
+			// 组装好之后才出现失败，当前首次入队策略仍把整个候选 Unit 放进 Fail。
+			// 后续如何拆出失败成员，不属于本次组装修改。
+			if len(failure.Unit.Members()) != 3 || failure.Unit.State().Queue != QueueFail {
+				t.Fatal("失败候选 Unit 未正确保留")
 			}
-			if len(failure.Unit.Members()) != wantMembers || failure.Unit.State().Queue != QueueFail {
-				t.Fatal("失败处理粒度错误")
-			}
-			drainActive(t, w, wantActive)
+			drainActive(t, w, 0)
 		})
+	}
+}
+
+func TestPartialAssemblyKeepsKnownFailuresSeparate(t *testing.T) {
+	full := testView("work", "mixed", AllowPartial, 3, 3)
+	first := *full
+	first.Members = full.Members[:1]
+	w := queueFor(full)
+	w.Policy = nil
+	selectOK(t, w, SelectRequest{View: &first})
+	key := full.Members[0].Group
+	failed := w.groups[key].pods[full.Members[0].Pod.UID]
+	failed.LastFailure = &group.FailureInfo{Reason: ReasonInsufficientResources}
+	w.Policy = DefaultPolicy
+	selectOK(t, w, SelectRequest{View: full})
+	failure, exists := w.Fail.Get(UnitKey{Group: key, ID: failed.UnitID})
+	if !exists || len(failure.Unit.Members()) != 1 {
+		t.Fatal("已有失败的成员应单独保留在 Fail")
+	}
+	healthy := drainActive(t, w, 1)[0]
+	if len(healthy.Members()) != 2 {
+		t.Fatal("正常的两个成员应一起组装，不被失败成员拖入 Fail")
 	}
 }
 
@@ -332,7 +397,7 @@ func TestSelectConcurrentMixedGroupAndPodEvents(t *testing.T) {
 		return
 	}
 	seen := make(map[types.UID]bool)
-	for _, unit := range drainActive(t, w, groupCount/2*(1+members)) {
+	for _, unit := range drainActive(t, w, groupCount) {
 		for _, pod := range unit.Members() {
 			if seen[pod.UID] {
 				t.Fatalf("Pod 重复归入不同单元: %s", pod.UID)

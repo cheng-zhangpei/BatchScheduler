@@ -27,12 +27,13 @@ type StagingLookup interface {
 	ContainsPod(group.Key, types.UID) bool
 }
 
-// SelectRequest 描述触发来源，Pod 与 View 必须且只能提供一个。
+// SelectRequest 描述触发来源，Pod、View、Return 必须且只能提供一个。
 // 调用方不指定 Scope，组级或 Pod 级处理由 Select 根据来源和组模式确定。
 type SelectRequest struct {
-	Pod   *corev1.Pod
-	View  *group.View
-	Nodes []*corev1.Node
+	Pod    *corev1.Pod
+	View   *group.View
+	Nodes  []*corev1.Node
+	Return *ReturnRequest // Buffer 已经确认失败并完成恢复，交回指定成员。
 }
 
 // SelectionInput 汇合 informer 事实和调度器内部记录。
@@ -40,7 +41,7 @@ type SelectRequest struct {
 // Policy 同步读取这些记录，不得修改、保留指针或执行 API/Agent 调用。
 type SelectionInput struct {
 	Scope      SelectionScope
-	Pod        *corev1.Pod // PodScope 时为缓存中的当前 Pod；Atomic 会提升为 GroupScope。
+	Pod        *corev1.Pod // 触发这次检查的 Pod；Partial 仍可组装同组其他可执行成员。
 	View       *group.View
 	Nodes      []*corev1.Node
 	GroupState *group.State
@@ -68,11 +69,23 @@ type selectionState struct {
 
 // Select 是唯一的首次入队入口：识别处理粒度 → 组装单元 → 策略判断 → 直接分发。
 // 已入队单元的队列间迁移由 Transition 负责。
-// TODO：感知机的待确定区确认结果后可重新提交视图；旧单元归属释放后才能组织新一轮。
-// main 初始同步及 Center 的组级 Apply 都可调用；旧单元归属清理仍待交接适配器接入。
+// 普通事件通过 Pod/View 进入；Buffer 失败回送通过 Return 进入，不再走普通事件的归属过滤。
 func (w *WorkQueue) Select(request SelectRequest) error {
-	if (request.Pod == nil) == (request.View == nil) {
-		return fmt.Errorf("Select 必须且只能提供 Pod 或组视图中的一个")
+	sources := 0
+	if request.Pod != nil {
+		sources++
+	}
+	if request.View != nil {
+		sources++
+	}
+	if request.Return != nil {
+		sources++
+	}
+	if sources != 1 {
+		return fmt.Errorf("Select 必须且只能提供 Pod、组视图或失败回送中的一个")
+	}
+	if request.Return != nil {
+		return w.selectReturn(*request.Return)
 	}
 	if request.Pod != nil {
 		return w.selectPod(request.Pod, request.Nodes)
@@ -82,7 +95,7 @@ func (w *WorkQueue) Select(request SelectRequest) error {
 
 // selectPod 解析 Pod 来源，无 Group 归属直接忽略；不要求指定 schedulerName。
 // 事件只提供身份，实际判断读取当前组视图；旧 UID 的事件不能影响同名新对象。
-// Atomic 提升为组级处理，Partial 只处理本次 Pod，不顺带投递其他成员。
+// Pod 事件只是触发检查；读到组视图后，组装本轮可接收的同组成员。
 func (w *WorkQueue) selectPod(pod *corev1.Pod, nodes []*corev1.Node) error {
 	key, belongs := group.GroupForPod(pod)
 	if !belongs {
@@ -139,7 +152,7 @@ func (w *WorkQueue) selectView(view *group.View, nodes []*corev1.Node, pod *core
 		return nil // 策略尚未配置，保留组装中的单元，不自动入队。
 	}
 	for _, unit := range record.units {
-		if !selectedUnit(input, unit) || w.isStaged(unit) {
+		if w.isStaged(unit) {
 			continue
 		}
 		state := unit.State()
@@ -153,44 +166,12 @@ func (w *WorkQueue) selectView(view *group.View, nodes []*corev1.Node, pod *core
 		if decision.To == QueueNone {
 			continue
 		}
-		if !isQueue(decision.To) {
-			return fmt.Errorf("Select 收到未知目标队列: %q", decision.To)
-		}
-		if err := unit.Freeze(); err != nil {
+		if err := prepareEnqueue(unit, decision); err != nil {
 			return err
 		}
-		var failure *group.FailureInfo
-		if decision.Reason != "" || decision.Message != "" {
-			failure = &group.FailureInfo{Reason: decision.Reason, Message: decision.Message}
-		}
-		// 先记录状态，再发布到队列，避免消费者取到仍标记为 Frozen 的单元。
-		if err := unit.MarkQueued(decision.To, failure, decision.WaitingFor); err != nil {
-			return err
-		}
-		switch decision.To {
-		case QueueActive:
-			w.Active.Add(unit)
-		case QueueFail:
-			w.Fail.Put(Failure{Unit: unit, Reason: decision.Reason, Message: decision.Message, RecoveryComplete: decision.RecoveryComplete})
-		case QueueRetry:
-			w.Retry.Put(Retry{Unit: unit, WaitingFor: decision.WaitingFor})
-		case QueueFastRetry:
-			w.FastRetry.Add(unit)
-		}
+		w.publishUnit(unit, decision)
 	}
 	return nil
-}
-
-func selectedUnit(input SelectionInput, unit Unit) bool {
-	if input.Scope != PodScope {
-		return true
-	}
-	for _, member := range unit.Members() {
-		if member.UID == input.Pod.UID {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *WorkQueue) isStaged(unit Unit) bool {
@@ -206,8 +187,8 @@ func (w *WorkQueue) isStaged(unit Unit) bool {
 }
 
 // assemble 先实现按 Pod 查归属、复用组装单元；不在这里决定封口条件。
-// Atomic 复用整组的组装单元；Partial 当前每个 Pod 一个单元，保持异常处理的细粒度。
-// Partial 以后仍可扩展批量提交；组调度结果的整体判断留给感知机。
+// 两种模式都复用尚未冻结的同组单元；Partial 不必等整组到齐，也不限制为单 Pod。
+// 通过 Buffer.ContainsPod 排除已经在执行的成员，不追加到已入队或已执行的 Unit。
 // 只处理组成员；不要求成员显式指定本调度器的 schedulerName。
 func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key group.Key) error {
 	mode := SubmitMode(input.View.Group.Spec.SubmitMode)
@@ -226,7 +207,7 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 		current[PodRef{Name: member.Pod.Name, UID: member.Pod.UID}] = true
 	}
 	for _, unit := range record.units {
-		if !selectedUnit(input, unit) || unit.State().Phase != UnitNew || unit.Frozen() || w.isStaged(unit) {
+		if unit.State().Phase != UnitNew || unit.Frozen() || w.isStaged(unit) {
 			continue
 		}
 		for _, ref := range unit.Members() {
@@ -243,9 +224,6 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 	}
 	for _, member := range input.View.Members {
 		pod := member.Pod
-		if input.Scope == PodScope && pod.UID != input.Pod.UID {
-			continue
-		}
 		if w.Staging != nil && w.Staging.ContainsPod(key, pod.UID) {
 			continue // 不因队列中找不到它而重复创建 Unit。
 		}
@@ -272,20 +250,23 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 		}
 		var target Unit
 		for _, unit := range record.units {
-			if mode == AllTogether && unit.Mode() == mode && unit.State().Phase == UnitNew && !unit.Frozen() {
+			if unit.Mode() == mode && unit.State().Phase == UnitNew && !unit.Frozen() && !w.isStaged(unit) {
+				// 已有明确失败的成员与正常成员分开，避免一个失败拖住整批正常任务。
+				if mode == AllowPartial && !sameAssemblyFailure(unit, record, state.LastFailure) {
+					continue
+				}
 				target = unit
 				break
 			}
 		}
 		if target == nil {
-			w.nextID++
-			id := fmt.Sprintf("unit-%d", w.nextID)
-			target = w.MakeUnit(UnitKey{Group: key, ID: id}, mode)
-			if target == nil || target.Key() != (UnitKey{Group: key, ID: id}) || target.Mode() != mode {
-				return fmt.Errorf("单元工厂返回了空单元或不匹配的身份/模式")
+			var err error
+			target, err = w.newUnit(key, mode)
+			if err != nil {
+				return err
 			}
-			record.units[id] = target
-			record.group.UnitIDs[id] = struct{}{}
+			record.units[target.Key().ID] = target
+			record.group.UnitIDs[target.Key().ID] = struct{}{}
 		}
 		if err := target.AddMember(PodRef{Name: pod.Name, UID: pod.UID}); err != nil {
 			return err
@@ -293,4 +274,20 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 		state.UnitID = target.Key().ID
 	}
 	return nil
+}
+
+// sameAssemblyFailure 让同一 Partial Unit 的成员使用相同的首次入队处理方式。
+// 例如正常成员一起进 Active，资源不足的成员另成一批进 Fail，不把两批混起来。
+func sameAssemblyFailure(unit Unit, record *selectionState, failure *group.FailureInfo) bool {
+	for _, ref := range unit.Members() {
+		existing := record.pods[ref.UID].LastFailure
+		if existing == nil || failure == nil {
+			if existing != nil || failure != nil {
+				return false
+			}
+		} else if existing.Reason != failure.Reason || existing.Message != failure.Message {
+			return false
+		}
+	}
+	return true
 }

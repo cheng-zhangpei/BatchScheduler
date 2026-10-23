@@ -2,9 +2,10 @@
 package errorengine
 
 import (
+	"time"
+
 	"batchscheduler/src/group"
 	"batchscheduler/src/workqueue"
-	"time"
 )
 
 // Input 告诉错误引擎：发生了什么、哪些成员受影响、之前的恢复是否做完。
@@ -30,7 +31,7 @@ const (
 )
 
 // Decision 是错误引擎的处理意见；staging 再加上 Unit 编号和版本，交给 Apply。
-// 两个包没有共用同一个 Decision 类型，因为 staging 已经调用这个包，这个包不能再导入 staging。
+// 这里只返回错误处理意见；evaluation 包再加上 Unit 编号和版本，组成完整决定。
 type Decision struct {
 	Transition *workqueue.TransitionRequest
 	Action     Action

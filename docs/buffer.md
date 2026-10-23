@@ -1,12 +1,12 @@
 # Buffer 源码阅读说明
 
-更新日期：2026-10-21。本文按当前源码说明实际行为；“还没实现”会明确写出来。
+更新日期：2026-10-23。本文按当前源码说明实际行为；“还没实现”会明确写出来。
 
 ## 1. 先记住 Buffer 在做什么
 
 Buffer 保存正在处理的 Unit 的执行进度。它还会观察这些成员在集群中变成了什么样，并决定下一步做什么。
 
-例如：这个 Unit 已经算好节点了吗？要不要预占资源？绑定完成了吗？失败后要不要恢复？这一轮能不能删记录？
+例如：这一轮执行到哪里了？执行器还在处理吗？集群看见绑定了吗？失败是否已恢复？这一轮能不能删记录？
 
 Buffer 不负责计算最佳节点，不直接提交绑定，也不是保存所有 Pod 历史的数据库。节点选择、资源预占、绑定和恢复交给执行器；正在排队的任务由 WorkQueue 保存。
 
@@ -32,30 +32,36 @@ informer：持续读取集群中的组和 Pod，告诉 Buffer 实际发生了什
 | 节点变化、已绑定 Pod 删除、调度门移除 → 重试通知 | 已注册；只是条件可能改善，不保证下次能调度 |
 | 退避时间到 → 再次评估 | main 每秒通知检查 Fail/Retry |
 | Active.Pop → Accept 的主循环 | **尚未实现**；测试中直接调用 |
-| Apply → 真正的调度/预占/绑定/恢复执行器 | **尚未实现**；main 的 Execute 为空 |
-| 旧 Unit 结束 → 真正解除队列旧关联、创建下一轮 | **尚未实现**；main 的 Handoff 为空 |
+| Apply → Execute → Report | 已接独立执行队列、内部 Filter/Pod Score 和持续 Report；组选点和真实资源操作待实现 |
+| 成功结束 → 解除队列旧关联 → 删除 Buffer 记录 | 已接 Handoff 的 Release 分支，队列处理函数为 WorkQueue.ReleaseUnit |
+| 失败恢复后 → 创建下一轮并回队列 | 已接 Handoff 的 Return 分支，通过 SelectRequest.Return 组装新 Unit 并放入 Fail |
 | compaction、FastRetry 准入、容量限制、Pending 超时核查 | **尚未实现** |
 
-所以“模拟执行器可以走完流程”不代表真实集群中已经能完成一次调度。也不能只说“所有 handler 都没接”：Select 和 Transition 已接，Execute 和 Handoff 未接。
+所以“模拟执行器可以走完流程”不代表真实集群中已经能完成一次调度。Select、Transition、Handoff 的 Release/Return、Execute 入口及 Report 回报通道已接；具体执行阶段和 Active 消费循环未实现。
 
 ## 3. 源码应该从哪里读
+
+目录先按四块看：`staging/` 是共用数据和接口，`buffer/` 保存和修改记录，`evaluation/` 只做决定，`error_engine/` 管错误映射及规则。
 
 | 文件 | 先回答的问题 |
 | --- | --- |
 | [types.go](../src/staging/types.go) | Record、Decision、Feedback 分别装什么 |
-| [buffer.go](../src/staging/buffer.go) | Unit 怎样进入 Buffer，三个 map 怎样登记 |
-| [observe.go](../src/staging/observe.go) | 集群观察怎样更新到 Record |
-| [observed_error.go](../src/staging/error_engine/observed_error.go) | Pod 原生调度原因怎样匹配成内部错误 |
-| [evaluation_queue.go](../src/staging/evaluation_queue.go) | 谁来消费组通知、调用评估 |
-| [evaluate.go](../src/staging/evaluate.go) | 怎样同时检查 Buffer、Fail/Retry、新成员 |
-| [decision_engine.go](../src/staging/decision_engine.go) | 一个 Unit 的预处理、报喜、报忧、正常推进 |
+| [contracts.go](../src/staging/contracts.go) | 外部函数和 Execution、Handoff 参数是什么 |
+| [buffer/buffer.go](../src/staging/buffer/buffer.go) | Unit 怎样进入 Buffer，三个 map 怎样登记 |
+| [buffer/observe.go](../src/staging/buffer/observe.go) | 集群观察怎样更新到 Record |
+| [error_engine/observed_error.go](../src/staging/error_engine/observed_error.go) | Pod 原生调度原因怎样匹配成内部错误 |
+| [buffer/evaluation_queue.go](../src/staging/buffer/evaluation_queue.go) | 谁消费组通知、调用评估 |
+| [buffer/evaluate.go](../src/staging/buffer/evaluate.go) | 怎样同时检查 Buffer、Fail/Retry、新成员 |
+| [evaluation/record.go](../src/staging/evaluation/record.go) | 一个 Unit 的四个评估阶段入口 |
 | [error_engine/engine.go](../src/staging/error_engine/engine.go) | 错误怎样分到不同 handler |
 | [error_engine/queue.go](../src/staging/error_engine/queue.go) | 什么错误可以去 Retry，什么条件可以回 Active |
-| [apply_decision.go](../src/staging/apply_decision.go) | Decision 怎样变成实际函数调用 |
-| [report.go](../src/staging/report.go) | 执行结果怎样推进 Record |
-| [apply.go](../src/staging/apply.go) | 外部函数定义、结束确认与真正删除 Record |
-| [queue_events.go](../src/staging/queue_events.go) | 节点事件、时钟怎样让等待任务再次评估 |
-| [main.go](../src/cmd/batchscheduler/main.go) | 上面这些函数究竟在哪里被连接起来 |
+| [buffer/apply.go](../src/staging/buffer/apply.go) | Decision 怎样分发到 Select、Transition、Execute、Handoff |
+| [buffer/report.go](../src/staging/buffer/report.go) | 执行进展和整轮结束怎样更新记录 |
+| [buffer/handoff.go](../src/staging/buffer/handoff.go) | 怎样让队列先处理旧关联，再删除 Record |
+| [buffer/release.go](../src/staging/buffer/release.go) | 结束确认和真正删除 Record |
+| [buffer/queue_events.go](../src/staging/buffer/queue_events.go) | 节点事件、时钟怎样让等待任务再次评估 |
+| [executor/schedule.go](../src/scheduler/executor/schedule.go) | 执行器内部怎样串起具体步骤 |
+| [main.go](../src/cmd/batchscheduler/main.go) | 上面这些函数在哪里连接 |
 
 不必一次看完。建议先跟着 U 走 Accept → Observe → Evaluate → Apply → Report，再单独看队列重试和 Handoff。
 
@@ -75,7 +81,11 @@ UID 是为了区分“旧 A 被删了，新建了同名 A”。同名不代表�
 
 Unit 放进队列前已经 Freeze。执行期间不能往 U 里追加或删除成员。以后要合并任务、拆出新的重试范围，必须创建新的 Unit。
 
-当前默认组装方式是 Atomic 一个整组 Unit，Partial 每个 Pod 一个 Unit；接口和 Buffer 允许 Partial 的 Unit 包含多名成员，也允许同组多个 Unit 同时存在。
+当前组装方式是 Atomic 等整组到齐，Partial 把当前可接收的同组成员批量装进 Unit，不必等整组到齐，也不限制为一个 Pod。assemble 通过 Buffer.ContainsPod 排除已经在执行的成员，再排除已有队列归属的成员。
+
+同组仍可有多个 Partial Unit：旧 Unit 已冻结或进入 Buffer 时，后到成员另成一批，不直接追加到旧 Unit。Pod 事件只是触发检查，不再把本轮候选范围限制为事件对应的一个 Pod。Partial 的区别在于允许部分成功和按失败范围恢复，不是固定拆成单 Pod 调度。
+
+组装中的正常成员与已有明确失败的成员分开成批，避免正常成员因为混入失败任务而被一起放进 Fail。已经组装好后才发生的成员失败，以及执行中的部分结果，仍需要后续完善反馈、拆分和回送；本次没有实现完整的部分恢复流程。
 
 ### 4.3 Record：U 这一轮做到哪一步
 
@@ -103,13 +113,13 @@ Evaluate 返回 Decision，只是安排，不是执行结果。
 | Return | 旧执行轮次结束，需要让队列接住下一轮任务 |
 | Release | 旧执行轮次已完成，只处理旧关联并结束本轮 |
 
-`ActionExecute` 还有 `Operation`：Schedule 算节点、Assume 预占资源、Bind 提交绑定、Recover 做必要恢复。不要把 Action 和 Operation 当作两个独立任务。
+`ActionExecute` 的 `Operation` 只有两种：Run 启动整轮执行，Recover 处理执行之外发现的旧轮次异常。Assume、Bind 是 Executor 内部步骤，不是 Buffer 单独发出的任务。
 
 ### 4.5 Execution / Feedback：请求与结果
 
 Apply 把 Decision 里的执行安排装成 Execution，交给 `handlers.Execute`。
 
-执行器完成后调用 `Report(ctx, Feedback{...})`。反馈中的 `ActionID` 必须对应这次请求，例如 action-3。它不是 informer 事件，也不是任意 Pod 状态更新。
+执行器每有进展或整轮结束，都调用同一个 `Report(ctx, Feedback{...})`。反馈中的 `ActionID` 必须对应这次请求，例如 action-3。它不是 informer 事件，也不是任意 Pod 状态更新。
 
 ## 5. Buffer 的三个 map 不是三份任务
 
@@ -266,7 +276,7 @@ API 请求返回的 Forbidden、Timeout 等不在这个 Pod 条件函数中，�
 
 Record.Failure 来自执行器，表示本轮已确认的操作失败，优先使用。成员已有内部 LastFailure 时也优先于观测匹配。
 
-尚未生成节点计划时，可以采用 Observe 匹配出的成员错误。已经有 Plan 或明确 NextOperation 后，不用还没刷新的旧 PodScheduled=False 推翻刚成功生成的计划。
+尚未生成节点计划时，可以采用 Observe 匹配出的成员错误。已经收到执行进度或已有 Plan 后，不用还没刷新的旧 PodScheduled=False 推翻刚成功生成的计划。
 
 这仍不是完整的错误新旧判断：原生条件不会携带我们的 ActionID，当前还没有逐次证明一个条件属于哪个调度轮次。这个边界需要以后单独讨论，不能把三条匹配规则说成已经覆盖所有集群异常。
 
@@ -357,7 +367,7 @@ Atomic 的失败范围是整轮；Partial 能定位某个成员失败时用失�
 
 ### 11.4 正常推进：下一件事是什么
 
-`evaluateProgress` 看 NextOperation：有明确下一步就生成 Execute；全部尚未调度则 Schedule；其他情况先 Wait。
+`evaluateProgress` 只决定是否启动一次 Run：尚未开始、没有旧计划、成员都未调度，才交给执行器。执行中的 Assume、Bind 和恢复由 Executor 自己继续，Buffer 不再逐步派发。待实现的步骤报告 Blocked 后先 Wait，不自动重新执行整轮。
 
 如果旧计划中的部分成员已经在集群分到了节点，就先等反馈，不继续对整轮重复预占或绑定。
 
@@ -380,7 +390,7 @@ Atomic 的失败范围是整轮；Partial 能定位某个成员失败时用失�
 
 ### 12.2 Fail 中的任务
 
-先要求 Failure.RecoveryComplete=true，明确证明之前的执行和清理已经完成。只是“任务现在位于 Fail”不能当作恢复完成。
+先要求 Failure.RecoveryComplete=true，明确证明之前的执行和清理已经完成。只是“任务现在位于 Fail”不能当作恢复完成。(对于这个调度器的错误后续针对每一个任务都要细化，现在其实还有明显可能堵死调度器的可能，后续一些强语义的情况清洗我认为最好是可以尝试用Agent接入)
 
 | 内部错误 | 是否生成 Fail → Retry | Retry 之后等什么 |
 | --- | --- | --- |
@@ -392,7 +402,7 @@ Atomic 的失败范围是整轮；Partial 能定位某个成员失败时用失�
 | TransientSchedulingError、BindingRejected | 是 | 当前统一退避一秒 |
 | SchedulingError、Forbidden、InvalidSpec、BindingUnknown、其他未识别错误 | 否 | 暂留 Fail，不自行定时重试 |
 
-回送方可通过 `QueueDecision.RecoveryComplete` 把确认传到 `Failure.RecoveryComplete`。真实 Handoff 还没实现，这个标记不会因为某个 Report 成功就自动传进 WorkQueue。
+Return 分支通过 `SelectRequest.Return.RecoveryComplete=true` 把确认传给 Select，再写入 `Failure.RecoveryComplete`。这个 true 来自 Evaluate 已确认恢复和收尾完成，不是只看某个 Pod 为 Pending。普通首次入 Fail 仍使用 `QueueDecision.RecoveryComplete`。
 
 ### 12.3 Retry 中的任务
 
@@ -411,7 +421,7 @@ Apply 入口只做：`prepareDecision` → 按 Action 选一个函数。
 | Wait | 直接返回 | 否 |
 | Select | applySelect → handlers.SelectGroup | 否 |
 | Transition | applyTransition → handlers.Transition | 否；这些 Unit 在队列里，没有 Center.Record |
-| Execute | beginAction → handlers.Execute | 是 |
+| Execute | beginAction → handlers.Execute | 是；明确没有资源操作时取消等待 |
 | Return/Release | beginAction → handlers.Handoff → finishHandoff | 是 |
 
 ### 13.1 prepareDecision 检查什么
@@ -424,12 +434,12 @@ Transition 不走 Record 的重评：先核对组、Unit 和请求参数，实�
 
 ### 13.2 beginAction 登记什么
 
-假设准备绑定：
+假设准备启动一整轮执行：
 
 ```text
 PendingAction    = action-3
 PendingDecision  = Execute
-PendingOperation = Bind
+PendingOperation = Run
 Revision         = 原值 + 1
 ```
 
@@ -443,32 +453,51 @@ Revision         = 原值 + 1
 
 Handlers 里的字段就是 Go 函数。创建 Buffer 时把函数赋给字段，以后调用该字段就运行这个函数，没有隐藏的消息系统，也不会自动变成异步线程。
 
-`handlers.Execute(ctx, request)` 这次调用本身是同步的。将来执行器可以快速接住请求，再让自己的工作线程处理，完成后调用 `Report`。
+`handlers.Execute(ctx, request)` 这次调用本身是普通函数调用。现在它快速把请求放入 Executor 的有界队列，然后返回；过滤和后续资源操作由 Executor.Run 的一个工作线程执行。
 
-“回调 Report”用直白的话就是：执行器做完，再调用 Buffer 的 Report 方法告诉它结果。
+入口在 `src/scheduler/executor/executor.go`。main 创建 Executor 和 Buffer，`handlers.go` 传入 Executor.Execute，再设置 `executor.Report = center.Report`，最后在 informer 就绪后启动 Executor.Run。没有额外的进度监控线程；Executor 直接调用 Report。
 
-`beginAction` 当前同时准备 Execution、Handoff 两种参数，调用者只取需要的一种。这是现有实现的便利写法，不代表同一个动作会同时执行两条路。
+整轮执行顺序在 `executor/schedule.go`：Filter → Pod Score → PlanGroup → Assume → Bind。执行过程中失败，由 `executor/flow.go` 自己进入 Recover。具体实现分别放在 `scheduler/steps/`，原生 Filter 适配放在 `scheduler/upstream/`。
 
-## 14. Report 怎样推进下一步
+当前 Filter 和 Pod 基础评分已实现。组评分和组选点尚未实现，所以评分完成后报告 Blocked；这不是成功，也不是调度失败。过滤已经确认无可用节点时，会报告内部错误并进入恢复；因为此时还没有资源操作，可以直接结清。真正持有预留或绑定时的恢复尚未实现。
 
-先确认 Unit 记录还在、ActionID 和 Operation 对得上。相同的最近一次 Feedback 重复到来直接返回，不再改一次状态。
+Execute 如果没有接收请求，例如执行队列已满，返回 ErrExecutionNotStarted，Apply 只取消对应 ActionID 的 Pending。已接收后的进展、错误、阻塞则通过 Report 返回。不能用“请求未接收”去掩盖已经开始的资源操作。
 
-| 反馈 | Record 的修改 |
+`beginAction` 同时准备 Execution、Handoff 两种参数，调用者只取需要的一种；同一个动作不会同时走两条路。
+
+## 14. Report 怎样记录进展和结束
+
+先确认 Unit 记录还在、ActionID 和 Operation 对得上。相同的最近一次 Feedback 重复到来直接返回，不再改一次状态。校验全部通过后才修改记录；不完整计划、预占后换计划、进度倒退都会被拒绝。
+
+### 14.1 Kind 说明这份报告是不是整轮结束
+
+| Kind | Record 的修改 |
 | --- | --- |
-| Unknown=true | 保留 Pending，当前不把诊断信息当成确认失败 |
-| Failure 非空 | 写 Record.Failure；恢复和收尾标记设 false；清 NextOperation |
-| Schedule 成功 | 保存完整成员 → 节点计划，NextOperation=Assume |
-| Assume 成功 | Members 设 Reserved，保存 PlannedNode，NextOperation=Bind |
-| Bind 成功 | Members 设 Bound，记录是否收尾完成，NextOperation 清空 |
-| Recover 成功 | RecoveryComplete=true，记录是否收尾完成，NextOperation 清空；原执行失败仍保留 |
+| Progress | 更新 ExecutionPhase、必要的计划和成员进度，保留同一次 Pending |
+| Unknown | 绑定或恢复的结果未确认，保留 Pending；不能自动当成失败重做 |
+| Finished | 必须已绑定或已恢复，且明确结清资源；清 Pending，允许 Evaluate 判断结束或回送 |
+| Blocked | 代码停在待实现步骤，记录 ExecutionBlocked；没有资源责任时可结束 Pending，有责任时继续保留 |
 
-通常处理后清掉 Pending，再给评估线程发 G 的通知。下一步不是 Report 自己调用 Assume 或 Bind，而是等 Evaluate 再产生决定。
+### 14.2 Phase 说明已经做到哪一步
 
-Bind/Recover 若只报告“操作成功但收尾未完成”，继续保留同一 ActionID；执行器以后要用这个编号补报收尾完成。
+| Phase | 保存什么 |
+| --- | --- |
+| Filtering / Filtered | 正在过滤 / 已完成过滤，还没有最终节点计划 |
+| Scored | Pod 基础评分完成；仍在等待组规划，没有完整计划 |
+| Planned | 完整成员 → 节点计划 |
+| Assumed | Members 设 Reserved，并保存 PlannedNode；实际预留由执行器负责 |
+| Binding | Members 设 Binding；若 Kind=Unknown 则设 BindingUnknown |
+| Bound | Members 设 Bound；仍需 Finished 才能结束本次执行等待 |
+| Recovering | 正在处理失败；确认的执行错误存入 Record.Failure |
+| Recovered | 本轮恢复完成，成员进度回 Unscheduled；失败原因继续保留，供回送 Fail |
 
-`ResponsibilitiesSettled=true` 目前是执行器给出的明确承诺，不是 Buffer 已经持有实际资源清理凭据。真实资源缓存还没写，所以不能误认为这个 bool 本身做了资源释放。
+每次有效报告修改 Record.Revision，并通知评估。Progress 到来时 Evaluate 看到 Pending，返回 Wait。Executor 不用等它批准，就直接执行下一步。
 
-重复结果处理也有范围：只记最近一份 Feedback；Record 已经删除后再来的反馈会报“记录不存在”，没有跨重启的结果存档。
+Finished 只代表执行器确认本轮结束，Observed 仍由 informer 更新。成功释放还需要集群观察也确认成员已绑定；失败返回还需要恢复和资源收尾都完成。
+
+`ResponsibilitiesSettled=true` 是执行器的明确承诺，不是这个 bool 自己释放了资源。真实资源缓存还没实现。有真实资源的恢复也不能靠清标记冒充。
+
+Report 只保留最近一份 Feedback；Record 删除后再来的反馈会报“记录不存在”，没有跨重启存档。Report 调用失败时，Executor 停在当前进度，不把汇报错误当成调度失败去追加资源操作。
 
 ## 15. Handoff 到底在处理什么
 
@@ -477,7 +506,7 @@ Bind/Recover 若只报告“操作成功但收尾未完成”，继续保留同�
 | 清理什么 | 谁应当处理 | 当前状态 |
 | --- | --- | --- |
 | 本轮预占资源、尚未确认的执行请求 | 执行/恢复组件 | 真实组件未实现 |
-| WorkQueue 中旧 Unit 与 Pod 的关联、下一轮入队 | handlers.Handoff 的真实实现 | 尚未接入 |
+| WorkQueue 中旧 Unit 与 Pod 的关联、下一轮入队 | handlers.Handoff | Release 调用 ReleaseUnit；Return 调用 Select 的回送输入，两条已接 |
 | Buffer 的 Record、groups、owners | finishHandoff / ConfirmHandoff → removeRecord | 已有代码，前提是队列已处理成功 |
 
 Handoff 处理第二项，并在成功后允许第三项发生。它不处理第一项，不删除集群 Pod，不计算新节点。
@@ -492,13 +521,13 @@ U 是通过 WorkQueue.Select 创建的，WorkQueue 内部还记着：A、B 属�
 
 ### 15.3 成功 Release 时要做什么
 
-预期的真实顺序是：
+当前 Release 已接好，顺序是：
 
 ```text
 执行器已确认绑定和资源收尾完成
 → Evaluate 产生 Release
 → Apply.applyHandoff 调用队列侧函数
-→ 队列侧清掉旧 U 的关联（具体代码还没实现）
+→ WorkQueue.ReleaseUnit 清掉旧 U 的关联
 → Handoff 返回 nil，表示已经处理好
 → finishHandoff 把 U 标 Done
 → removeRecord 删除 Buffer 中 U 的记录和索引
@@ -506,19 +535,29 @@ U 是通过 WorkQueue.Select 创建的，WorkQueue 内部还记着：A、B 属�
 
 不是删除 G、A、B；只是本轮 U 不再需要被跟踪。以后 informer 仍会观察这个组。
 
+ReleaseUnit 在 workqueue/release.go 中实现。先检查 Unit 为 Processing 且 Queue=None，然后删除该 Unit 的队列管理记录、组内编号，以及仍指向它的 Pod 内部状态。同组其他 Unit 和成员保留；没有任何 Unit 后删除空组目录。它不调用 MarkFinished，后面的 finishHandoff 才把 Unit 标成 Done。旧记录已经不存在时直接返回成功，重复请求不会误删新 Unit。
+
 ### 15.4 失败 Return 时要做什么
 
 先由 Recover 处理必要的资源清理，Report 确认完成，Evaluate 才返回 Return。
 
-队列侧将来需要解除旧 U 的成员关联，建立正确的下一轮状态，组织新 Unit，经 Select 放入 Fail，并传入内部错误和明确的恢复完成标记。旧 U 的成员已经冻结，不能直接把它当作可追加的新 Unit。
+main 的 Handoff 调用 `queues.Select(SelectRequest{Return: ...})`，提供旧 U 的编号、回送成员、内部错误，以及恢复完成确认。Return 是 Select 的一种输入，不是第二套公开入队方法。
 
-以上是外部函数需要完成的约定，**不是当前仓库里已经存在的实现**。
+普通 Pod/View 输入会跳过 Buffer 正在处理的成员；Return 表示 Buffer 明确交回这些成员，因此不走普通事件的跳过规则。它只允许回送指定旧 U 的成员，不会取走同组其他 Unit 的 Pod。
 
-不能把 Handoff 简化成现在直接调用 Select：此时 Buffer.owners 仍记着 A/B 正由 U 处理，Select 会跳过它们。若再假装调用成功并删 Record，任务就可能没有真正重新入队。
+源码在 `src/workqueue/select_return.go`，按三步阅读：
 
-旧关联解除、下一轮接收、Buffer 结束旧轮次之间怎样协调，是后续必须由我们一起写清楚的逻辑。当前接口和模拟测试没有替代这件事。
+1. `validateReturn` 检查旧 U 还在 Processing，组和 Pod 身份没有变化。Atomic 必须回送整轮；Partial 可回送多个失败成员，仍然组成一个 Unit。回送成员必须未绑定、未结束；没有列入失败范围的成员不跟着进 Fail。
+2. `newUnit` 创建新编号，加入回送成员；`prepareEnqueue` 冻结并登记 Fail 状态。这时新 Unit 还只在局部变量中，旧记录没有修改。工厂或 Unit 方法失败时可以保留旧轮次再处理。
+3. 准备成功后，`removeUnit` 删除旧队列关联，登记新 Unit 和新成员状态，`publishUnit` 放入 Fail。新成员内部进度重新从 Unscheduled 开始，同时保存这次错误和恢复确认。与普通 Select 使用同一把管理锁，其他提交不能在替换中途插入重复任务。
 
-Partial 若只重试 A，也必须确认旧 U 中 B 的记录怎样结束或被继续跟踪。不能只把 A 塞回队列，然后随便删掉整个 U，把 B 丢在没人管理的地方。
+`newUnit`、`prepareEnqueue`、`publishUnit` 在 `select_enqueue.go`，普通提交也使用这些函数。Return 不再调用普通 Policy 重新猜目标队列，因为 Evaluate 已经决定回 Fail；之后能不能重试，仍由已有 Transition 路径判断。
+
+以上成功后 Handoff 返回 nil，Buffer 的 `finishHandoff` 才把旧 U 标 Done、删除旧 Record，并重新通知这个组的评估。Partial 剩余未失败、未绑定的成员会被下一次 Evaluate 找到，生成普通 Select 决策并按正常流程入队，不会因为旧轮次结束被漏掉。`ConfirmHandoff` 后补确认回送成功时也会发出这个通知。
+
+WorkQueue 不替 Buffer 删除记录，也不修改旧 U 的冻结成员。新 Unit 暂时仍对应 Buffer 持有的 Pod，因此 Transition 在旧 Record 清理前会拒绝迁移；清理后的评估通知和 main 周期检查会继续检查 Fail/Retry。
+
+同一张 Return 请求再到达时，旧 U 已不在队列索引中，会报“旧 Unit 已不存在”，不会再建一个新 Unit。正常 Apply 通过 Pending 和 Record 版本阻止重复执行；当前本地 Handoff 没有网络调用，也没有成功一半再返回普通 error 的步骤。不保存永久的回送历史，也不承诺跨进程重启恢复。
 
 ### 15.5 为什么分成三个函数
 
@@ -596,14 +635,14 @@ Apply 成功处理提示后删除暂存提示；如果 Transition 只是记住�
 | 时刻 | Record 里主要变化 | 谁决定下一步 |
 | --- | --- | --- |
 | Select 后还在 Active | 没有 Record | 等未来消费循环 Pop |
-| Accept U | Members=Unscheduled，写三份关联，Revision=1 | 通知评估 |
-| Observe | Observed 中 A/B 未绑定，无匹配错误 | Evaluate → Execute Schedule |
-| Apply | Pending=action-1 / Execute / Schedule | 调用执行器 |
-| Report Schedule 成功 | 保存 Plan，NextOperation=Assume，清 Pending | Evaluate → Execute Assume |
-| Report Assume 成功 | Members=Reserved，NextOperation=Bind | Evaluate → Execute Bind |
-| Report Bind 成功且已收尾 | Members=Bound，Settled=true，清 Pending | 等集群观察也看见绑定 |
-| Observe 看见 A/B 都有 NodeName | 不覆盖 Members，只更新 Observed | Evaluate → Release |
-| 队列侧结束处理确认成功 | Unit=Done，删除 Record/groups/owners | 本轮结束 |
+| Accept U | Members=Unscheduled，登记关联 | 通知评估 |
+| Observe | Observed 中 A/B 未绑定，无匹配错误 | Evaluate → Execute Run |
+| Apply | Pending=action-1 / Execute / Run | 请求交给 Executor |
+| Report Progress / Planned | 保存完整 Plan，保留 action-1 | Executor 继续 Assume |
+| Report Progress / Assumed | Members=Reserved，保留 action-1 | Executor 继续 Bind |
+| Report Finished / Bound | Members=Bound，Settled=true，清 Pending | 等集群观察确认绑定 |
+| Observe 看见 A/B 都有 NodeName | 只更新 Observed | Evaluate → Release |
+| 队列侧结束处理成功 | Unit=Done，删除 Record/groups/owners | 本轮结束 |
 
 Report 可以先于 Observe，也可以反过来。只看到 Pod 绑定不能代替执行器确认资源收尾；只有 Report 也不能凭空写成 API 已经观察到了绑定。
 
@@ -616,10 +655,10 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 → Record.Observed[A].Failure = 内部 Unschedulable
 → Evaluate 发现本轮有错误，Atomic 把范围扩为 A、B
 → error_engine 返回 Recover 决策
-→ Apply 交给执行器（真实执行器未实现）
+→ Apply 交给 Executor 的独立 Recover 入口（真实资源恢复待实现）
 → Report 确认恢复和收尾完成
 → Evaluate 返回 Return
-→ Handoff 组织下一轮回 Fail（真实实现未接）
+→ Handoff 调用 Select 的 Return 输入，创建下一轮并放入 Fail
 → 队列里这条失败已明确 RecoveryComplete=true
 → Evaluate 生成 Fail → Retry
 → 相关资源/节点/放置条件变化
@@ -627,7 +666,7 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 → Apply 调用 WorkQueue.Transition
 ```
 
-中间两处未实现已经标出。测试可以使用模拟执行器/模拟交接验证相邻接口，但真实程序还不能自动越过空的 Execute/Handoff。
+这里真实资源操作仍未实现。现有测试覆盖模拟执行反馈、真实 Handoff/Select/Transition；入口测试还覆盖真实 Buffer → Execute → 原生 Filter，确认不会把候选节点报成完整计划。目前没有 Active 消费循环。
 
 ## 19. 设计取舍与已知缺口
 
@@ -641,7 +680,7 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 | 一个评估线程 | 当前控制流程容易推理 | 外部函数若耗时不返回，会挡住其他组 |
 | 未知结果先等待 | 避免重复绑定、重复入队 | Pending 缺少超时核查，可能长期保留 |
 | 完成后删除 Record | 不为结束任务无限保存历史 | 没有长期查询历史；重启后也不恢复本轮执行 |
-| Handler 通过函数字段提供 | Buffer 不直接依赖尚未写出的执行组件 | Handoff 的关键协调目前仍只是要求，不是实现 |
+| Handler 通过函数字段提供 | Buffer 不直接依赖执行组件 | Handoff 和 Execute/Report 入口已接，具体执行阶段待实现 |
 | 匹配标准 Pod 调度条件 | 原生异常终于能进入内部错误引擎 | 不是所有 Reason 的完整词典，也没有完整的新旧轮次判断 |
 
 还需要以后逐项讨论，但本轮没有擅自改行为的地方：
@@ -650,10 +689,10 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 - Observe 仍在 informer 的通知函数里同步读取组视图，并由 observeMu 串行执行。大组和高频更新可能增加观察延迟。
 - 同组多 Unit 只是关联、分别决策，还没有合并计划。batch=32 不解决同组 Unit 到达时间分散的问题。
 - 已有节点的 Pod 运行失败不等于可以直接重绑；重建和业务恢复与 operator 的边界需要单独明确。
-- Recover 自己失败时，尚未有单独的等待/升级策略；若执行器每次立即失败并继续通知，可能重复安排恢复。
+- 绑定或恢复结果未知时保留 Pending，但尚未有超时核查和继续执行机制；长期无结果可能一直等待。
 - 权限/声明错误当前留 Fail。外部修复后怎样重新确认错误已经消失，需要后续补规则，不是收到任意节点事件就放行。
 - Failed Unit、过期组、重试提示的最终清理还没有一个覆盖所有状态的清理机制。
-- Handoff 部分成功、普通 error 的严格含义、队列旧关联解除和下一轮创建怎样一起完成，还要真正实现和验证。
+- Handoff 已实现本地队列的先准备、后替换。未来如果接入可能部分成功的外部服务，仍要另外实现结果未知时的查询与确认。
 - 没有做真实集群、竞态检测或性能压测。已有单元测试不能证明生产正确性。
 
 ## 20. 测试在哪里证明了什么
@@ -667,7 +706,9 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 | decision_engine_test.go | 报喜不掩盖失败；队列版本校验与真实 Transition 调用 |
 | error_engine/engine_test.go | 错误收尾规则与输入输出不共享可改成员/错误 |
 | queue_flow_test.go | 不手写 Decision，自动评估并执行 Fail → Retry → Active；无关事件及不允许重试的错误不放行 |
-| apply_test.go | 模拟执行器的 Schedule/Assume/Bind、恢复、未知结果和结束确认 |
+| buffer/apply_test.go、buffer/report_test.go | 同一 Run 的进度报告、内部恢复、未知结果、结束确认和非法报告拒绝 |
+| release_handoff_test.go / return_handoff_test.go | 真实队列的成功清理，以及模拟执行失败 → Select 回送 → Fail/Retry/Active → 再次 Accept |
+| workqueue/select_return_test.go | Partial 多成员回送、保留同组其他 Unit；无效请求和工厂失败时保留旧记录 |
 
 命令是 `go test ./src/... -count=1`。这些测试使用内存结构和 fake client，没有往用户的集群绑定、删除或创建实际工作负载。
 

@@ -11,7 +11,9 @@ import (
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/informer"
+	execution "batchscheduler/src/scheduler/executor"
 	"batchscheduler/src/staging"
+	"batchscheduler/src/staging/buffer"
 	"batchscheduler/src/utils"
 	"batchscheduler/src/workqueue"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -54,30 +56,9 @@ func run() error {
 	}
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
-	center := staging.NewBuffer(observed.GroupViews, staging.Handlers{
-		// 把 WorkQueue 的两个查询函数交给 Buffer，评估时才能看到 Fail/Retry 的任务。
-		QueueSnapshot: queues.GroupSnapshot,
-		WaitingGroups: queues.WaitingGroups,
-		Transition: func(ctx context.Context, request workqueue.TransitionRequest) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			return queues.Transition(request)
-		},
-		SelectGroup: func(_ context.Context, view *group.View) error {
-			if !utils.ShouldEnqueue(view) {
-				return nil
-			}
-			nodes, err := observed.Nodes.List(labels.Everything())
-			if err != nil {
-				return err
-			}
-			return queues.Select(workqueue.SelectRequest{View: view, Nodes: nodes})
-		},
-		// Execute 还没实现：目前没有真实算节点、预占、绑定的代码。
-		// Handoff 还没实现：目前不能真正解除旧队列关联并把失败成员组织成下一轮。
-		// 这些字段为空时 Apply 返回错误，不会假装已经执行或清理成功。
-	})
+	executor := execution.NewExecutor(observed.GroupViews, observed.Nodes, observed.Pods)
+	center := buffer.NewBuffer(observed.GroupViews, newStagingHandlers(queues, observed.Nodes, executor))
+	executor.Report = center.Report
 	queues.Staging = center
 	if err := observed.OnRetryChange(center.NotifyRetry); err != nil {
 		return err
@@ -103,6 +84,9 @@ func run() error {
 		return err
 	case <-ready:
 	}
+	// 执行器只增加一个工作线程：自己推进整条执行线，通过 Report 回报 Buffer。
+	executionDone := make(chan error, 1)
+	go func() { executionDone <- executor.Run(ctx) }()
 	// 缓存就绪后才启动评估，避免把初始跨资源 List 顺序当作任务异常。
 	queueChecksDone := make(chan struct{})
 	// 一个定时线程，每秒通知检查 Fail/Retry，让退避时间到后能继续推进。
@@ -138,6 +122,9 @@ func run() error {
 		<-queueChecksDone
 		if err := <-evaluationDone; err != nil {
 			slog.Error("评估 worker 退出", "error", err)
+		}
+		if err := <-executionDone; err != nil {
+			slog.Error("执行 worker 退出", "error", err)
 		}
 	}()
 

@@ -1,0 +1,12 @@
+github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+k8s.io/api v0.34.7/go.mod h1:2qet0m0IfHSwXp+RLnunTWADUjy6qaXDa4PdeUnTJ9s=
+k8s.io/apiextensions-apiserver v0.34.7/go.mod h1:rtx7XxaKq0ZH/9/wWQgA0J4HQqCAnQMwdaMJGmpGwxE=
+k8s.io/apimachinery v0.34.7/go.mod h1:z7dd12Xd400CXIycE8nmn32xZhApV9zskHs0A5xeU/Q=
+k8s.io/apiserver v0.34.7/go.mod h1:7+me/mC1L/BRkb7MbUwUpppl/BNodyt28bgVmytocrs=
+k8s.io/client-go v0.34.7/go.mod h1:GS3K60t9FI20+l3cvB/EfDXyD+JoKr3suIjSGISQLDc=
+k8s.io/component-base v0.34.7/go.mod h1:8nuSOhmTwQ3lz79kDPXtLD7NviHYhAF8vAgX++NCgiY=
+k8s.io/component-helpers v0.34.7/go.mod h1:IcLhZ97EhruEg8S47sZVsfhRoPSK/OEHAJgMzrP1V7Q=
+k8s.io/controller-manager v0.34.7/go.mod h1:CK1FnMX2WNDsp8iHJVI0cL/tpnA8wAlENPVJ6uKsJZY=
+k8s.io/dynamic-resource-allocation v0.34.7/go.mod h1:+znfWeENbhIOHe641gZXOCqe0Aya84KGctAPcBE0bWQ=
+k8s.io/klog/v2 v2.130.1/go.mod h1:3Jpz1GvMt720eyJH1ckRHK1EDfpxISzJ7I9OYgaDtPE=
+k8s.io/kube-scheduler v0.34.7/go.mod h1:J1EflxHjWBK3sDCiy1BsxqNCA9IUJh17t04pAw0ynFs=

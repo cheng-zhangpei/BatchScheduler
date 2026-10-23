@@ -1,0 +1,70 @@
+package steps
+
+import (
+	"context"
+	"fmt"
+
+	"batchscheduler/src/scheduler"
+	"batchscheduler/src/scheduler/upstream"
+	"batchscheduler/src/staging"
+	"batchscheduler/src/workqueue"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+)
+
+// Filter 先补齐本轮成员和集群资源，再调用已有 GroupFilter。
+func (r *Runner) Filter(ctx context.Context, a *Attempt) (map[workqueue.PodRef]scheduler.PodFilterResult, error) {
+	if r.views == nil || r.nodes == nil || r.pods == nil {
+		return nil, fmt.Errorf("过滤缺少组、节点或 Pod 读取器")
+	}
+	pods, err := r.members(a.Request)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := r.nodes.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("读取节点: %w", err)
+	}
+	assigned, err := r.pods.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("读取集群 Pod: %w", err)
+	}
+	single, err := upstream.NewPodFilter(ctx, nodes, assigned)
+	if err != nil {
+		return nil, err
+	}
+	results, err := NewGroupFilter(single).Filter(ctx, pods)
+	if err != nil {
+		return nil, err
+	}
+	a.members, a.filter = pods, single
+	return results, nil
+}
+
+// members 按本轮冻结的 Pod 引用取完整对象，不把同组其他 Unit 的成员也带进来。
+func (r *Runner) members(request staging.Execution) ([]*corev1.Pod, error) {
+	key := request.Unit.Group
+	view, err := r.views.Get(key.Namespace, key.Name)
+	if err != nil {
+		return nil, fmt.Errorf("读取执行组: %w", err)
+	}
+	if view == nil || view.Group == nil || view.Group.Namespace != key.Namespace || view.Group.Name != key.Name || view.Group.UID != key.UID || view.Group.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("执行组已变化或正在删除")
+	}
+	current := make(map[workqueue.PodRef]*corev1.Pod, len(view.Members))
+	for _, member := range view.Members {
+		if member.Group == key && member.Pod != nil {
+			current[workqueue.PodRef{Name: member.Pod.Name, UID: member.Pod.UID}] = member.Pod
+		}
+	}
+	pods := make([]*corev1.Pod, 0, len(request.Members))
+	for _, ref := range request.Members {
+		pod := current[ref]
+		// 旧引用不能拿到同名新 Pod，也不能重新调度已经绑定或结束的 Pod。
+		if pod == nil || pod.Spec.NodeName != "" || pod.DeletionTimestamp != nil || (pod.Status.Phase != "" && pod.Status.Phase != corev1.PodPending) {
+			return nil, fmt.Errorf("成员 %s 已变化、已绑定或已结束", ref.Name)
+		}
+		pods = append(pods, pod.DeepCopy())
+	}
+	return pods, nil
+}

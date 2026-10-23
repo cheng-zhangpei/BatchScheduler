@@ -1,6 +1,52 @@
 # BatchScheduler 架构与进度
 
-更新日期：2026-10-21。以当前代码和本次讨论为准，不使用百分比估算完成度。
+更新日期：2026-10-23。以当前代码和本次讨论为准，不使用百分比估算完成度。
+
+### 2026-10-23：接入 Pod Score，组评分待讨论
+
+- 执行链为 Filter → Pod Score → PlanGroup → Assume → Bind。Mode 从冻结 Unit 经 Execution、GroupScoreInput 传入组规划。
+- upstream.PodScore 已接 NodeResourcesFit（LeastAllocated）、NodeResourcesBalancedAllocation、NodeAffinity、TaintToleration，四插件等权；CPU/内存等权。
+- PreScore / Score / NormalizeScore / 汇总均调用原生实现；评分复用 Filter 的同一份 NodeInfo。
+- 每个 Pod 返回总分降序列表和插件分数，保留全部候选；Atomic/Partial 的差异暂不作用于 Pod 基础评分。
+- Report 增加 Scored 进度；组评分、组内试放和组选点尚未实现，当前在 PlanGroup 转为 Blocked。
+- 评分适配、真实插件和 mode 透传已有测试；没有集群或性能测试。阅读入口见 [Pod Score](docs/score.md)。
+
+下次从组评分和组选点开始讨论：输入已是 Mode + 各 Pod 的完整评分列表，入口为 `src/scheduler/steps/plan.go`；先确定偏好与规则，再写实现。
+
+以下保留本日先前的开发记录，以本节为最新评分进度。
+
+### 2026-10-23：先修正 Partial 的 Unit 组装
+
+本日执行线新增：`steps.GroupFilter` 已通过 `upstream.PodFilter` 实际调用六个原生基础过滤插件。
+源码子集固定在 `third_party/kubernetes`，v1.34.7，21 包 / 54 个 Go 文件约 1 MB；原生 Go 文件未修改，带许可证和 SHA-256 清单。
+适配层读取本轮 Node/已分配 Pod，准备原生 NodeInfo，为每个成员执行 PreFilter/Filter，返回候选节点和拒绝原因。
+这不是完整默认过滤配置；硬 Pod 亲和性、硬拓扑、存储与 DRA 尚未接入，会明确报错。
+
+执行边界已调整：Buffer 只提交整轮 Run，Executor 快速接进内部队列，由一个执行工作线程组织 Filter → PlanGroup → Assume → Bind，失败时内部 Recover。
+同一轮通过同一个 Report、同一个 ActionID 持续回报。Progress/Unknown 保留 Pending，Finished 且资源已结清才结束等待；Evaluate 不再派发 Assume/Bind。
+当前 Filter 已实现；组选点未实现时报告 Blocked，停止等待开发，不自动重新执行。过滤失败且尚无资源占用时可以内部结清，再回 Fail。
+
+目录已拆分：
+- `src/scheduler/upstream/`：原生插件适配；`executor/`：编排和回报；`steps/`：具体步骤。
+- `src/staging/`：共用类型和接口；`buffer/`：记录和交接；`evaluation/`：分阶段决策；`error_engine/`：错误映射和规则。
+
+**目前已有过滤能力、执行工作线程和连续回报；组内节点选择、真实 Assume/Bind/Recover、Active 消费仍未完成。**
+我们只需要先掌握调用边界，说明见 [Filter 适配](docs/filter.md)，不要求逐行阅读第三方内部实现。
+
+- Partial 不再默认每个 Pod 一个 Unit。在 assemble 中查询 Buffer.ContainsPod，排除在处理的成员和已有归属的成员，把当前可接收的同组成员批量装进尚未冻结的 Unit。
+- Pod 事件仍保留触发来源信息，但组装会检查同组其他成员；不等整组到齐，不追加到已入队/进入 Buffer 的旧 Unit。
+- 已有明确失败的成员与正常成员分开组装。本次只修正组装行为，不宣称整操作反馈已经支持完整的成员级成功、失败和回送。
+- 后续仍按一个接口、一个决策逐步接入。以下旧检查点中“Partial 单 Pod”的描述由本节更新。
+
+本日随后实现 Handoff 的 Release 分支：`WorkQueue.ReleaseUnit` 只接受 Processing/Queue=None，
+删除旧 Unit、组内编号和仍属于它的成员状态；保留同组其他 Unit，旧记录已不存在时重复调用成功。
+main 已接 Release，Buffer 在队列清理成功后再标记 Done、删除 Record。
+
+随后接通 Handoff 的 Return 分支，统一调用 `WorkQueue.Select`，没有增加第二个公开入队入口：
+- `SelectRequest.Return` 提供旧 Unit、回送成员、内部错误及恢复完成确认。
+- Atomic 回送整轮；Partial 可以把多个失败成员放进同一个新 Unit。旧 Record 删除后会重新通知评估，剩余未失败、未绑定的成员走普通 Select，不跟着失败成员进 Fail。
+- 先检查并准备新 Unit，再替换旧队列记录、把新 Unit 放入 Fail；函数成功后 Buffer 才标记旧 Unit Done 并删除 Record。
+- 已验证模拟执行失败 → 真实 Handoff/Select → Fail → Evaluate/Apply/Transition → Retry → 相关事件 → Active → 再次 Accept。真实执行器和消费循环仍未实现。
 
 ### 2026-10-21 收工位置 / 明天回来先看这里
 
@@ -13,12 +59,12 @@
 | 报喜 | 成员已绑定且责任结清则生成 Release；不在评估里删记录 | 真实清理仍需 Handoff 解除队列侧旧归属 |
 | 报忧：Center 中的 Unit | 错误引擎集中入口，case 分类到 handler；Observe 已匹配 Unschedulable、SchedulerError、SchedulingGated 三种标准原生原因；已有错误先恢复、再回 Fail | 其他原生原因、API 请求错误及错误属于哪一轮的完整判断仍需补；各类错误策略还需逐项细化 |
 | 报忧：Fail/Retry 中的 Unit | 读取队列快照，按错误、恢复确认和唤醒条件生成 Transition；Apply 已调用真实迁移 | 回送者必须明确确认 RecoveryComplete，不能仅因任务在 Fail 就准许重试 |
-| 正常推进 | 生成 Schedule → Assume → Bind 阶段决策 | **真实执行器未实现/注入**；Report 的阶段推进仅在模拟执行下验证 |
+| 正常推进 | 只生成一次 Run；Executor 内部组织各步骤并持续 Report | Filter 已接真实原生插件，组选点和真实资源操作待实现 |
 
 详细说明见 [Buffer 源码阅读说明](docs/buffer.md)，逐个解释字段、函数、Handoff 和未完成项。
 
-阅读顺序：`src/staging/decision_engine.go` 的阶段入口 → `src/staging/error_engine/` 的错误 handler
-→ `src/staging/apply_decision.go` 的动作分发。`Evaluate` 不修改 Buffer，Apply/Report 等入口负责更新。
+阅读顺序：`src/staging/evaluation/record.go` 的阶段入口 → `src/staging/error_engine/` 的错误 handler
+→ `src/staging/buffer/apply.go` 的动作分发。`Evaluate` 不修改 Buffer，Apply/Report 等入口负责更新。
 
 本日额外接通：Transition 队列版本检查；低频时钟、节点变化及已绑定 Pod 删除的重试通知。
 测试无需手写 Decision，已验证评估器自动生成并执行 Fail → Retry → Active；不相关事件、
@@ -83,7 +129,7 @@ Group 是任务与结果汇总边界，Unit 是处理机会和一轮尝试的载
 | 实际调度周期 | 未实现 | informer 提供原始节点事实 | 资源快照、过滤 / 选择、组内联合资源计算、放置方案 | 暂无实现 |
 | 调度资源缓存与 Assume / Forget | 未实现 | 已区分其与 informer 缓存的职责 | 临时占用、确认转正、失败释放、幂等与超时确认 | 暂无实现 |
 | binding cycle | 未实现 | 仅有 PodBinding / PodBindingUnknown 等状态定义 | 真实绑定请求、异步结果、部分成功及未知结果处理 | 暂无实现 |
-| 感知与组结果汇总 | 观察及评估部分实现 | Pod/Group 变化更新本轮观察；Atomic/Partial 恢复范围建议 | 原生错误映射、执行结果反馈、完整组进度及恢复闭环 | `src/staging/observe.go`、`evaluate.go` |
+| 感知与组结果汇总 | 观察及评估部分实现 | Pod/Group 变化更新本轮观察；Atomic/Partial 恢复范围建议 | 原生错误映射、执行结果反馈、完整组进度及恢复闭环 | `src/staging/buffer/observe.go`、`evaluate.go` |
 | operator | 未实现 | 约定创建 PodGroup 和带组 ownerReference 的 Pod | 创建、重建、业务生命周期维护 | 暂无实现 |
 
 ## 3. 当前实际可运行的路径

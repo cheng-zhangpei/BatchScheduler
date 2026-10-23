@@ -4,7 +4,7 @@ A group-oriented Kubernetes scheduler built in Go, with explicit scheduling unit
 
 BatchScheduler is being developed as a standalone scheduler inspired by the Kubernetes scheduling architecture. It explores how groups of related Pods can be admitted, tracked, and recovered together while supporting smaller scheduling units where partial progress is appropriate.
 
-**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. The runtime does not yet perform node placement or bind Pods. Real execution, resource reservation, and execution-to-queue handoff remain under development.
+**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. The runtime does not yet perform node placement or bind Pods. Native filtering and per-Pod scoring are connected. Group placement, resource reservation, and real binding/recovery remain under development.
 
 ## Project Goals
 
@@ -37,7 +37,7 @@ The supported modes are:
 | Mode | Scheduling intent | Current unit assembly |
 | --- | --- | --- |
 | `AllTogether` | Admit the complete declared group as one scheduling unit | Wait for all expected members before initial admission |
-| `AllowPartial` | Allow members to make progress independently | Assemble one unit per Pod by default |
+| `AllowPartial` | Allow partial success and recovery without requiring the complete group | Batch currently eligible members into a unit without waiting for the whole group |
 
 `AllTogether` currently defines admission and recovery scope. Transactional group binding is not implemented.
 
@@ -98,10 +98,14 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - UID-aware group membership and member indexes.
 - Scheduling-unit assembly, frozen membership, and lifecycle tracking.
 - Initial queue selection for whole-group and partial submission.
+- Group filtering backed by six unmodified Kubernetes v1.34.7 filter plugins; unsupported hard constraints are explicitly rejected.
+- Per-Pod scoring backed by four native plugins, with sorted candidate lists and submission mode forwarded to group planning.
 - Active/FastRetry FIFO storage and keyed Fail/Retry storage.
 - Center acceptance, observation, staged evaluation, action dispatch, and execution feedback.
+- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results; execution currently stops after native filtering and Pod scoring because group placement is pending.
 - Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
 - Version-checked queue transitions with retry classification and event/backoff conditions.
+- Release and failure-return handoff: completed attempts are removed, and failed members enter a new Fail-queue unit through Select before the Center drops the old record.
 - Retry notifications from node changes, bound-Pod deletion, scheduling-gate removal, and periodic queue checks.
 - Unit and fake-client integration tests for observation, decision generation, queue migration, and simulated execution.
 
@@ -111,7 +115,6 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Node-placement algorithms and group-aware resource planning.
 - A scheduling resource cache with Assume/Forget semantics.
 - Real binding and recovery executors.
-- Queue-side handoff, old-unit cleanup, and creation of subsequent attempts.
 - Broader failure mapping, operation timeout reconciliation, and restart recovery.
 - Buffer capacity controls, fairness, compaction, and FastRetry admission.
 - A workload operator and validation against a live cluster.
@@ -157,7 +160,7 @@ The process also supports the standard `KUBECONFIG` environment variable and def
 
 At startup, it synchronizes the Pod, Node, and PodGroup caches, logs resource counts, and evaluates observed groups for initial admission. It continues processing observation and retry notifications until interrupted.
 
-**Running this prototype does not schedule or bind Pods.** The real execution and handoff functions are not registered, and there is no Active-queue consumer yet. The current runtime reads cluster resources and updates its own in-memory state.
+**Running this prototype does not schedule or bind Pods.** The executor worker and Report callback are registered; execution performs filtering and Pod scoring but placement, Assume, Bind and resource recovery remain unimplemented. There is no Active-queue consumer yet. Release and failed-attempt handoff are connected. The current runtime reads cluster resources and updates its own in-memory state.
 
 ### Build
 
@@ -173,10 +176,17 @@ src/
   cmd/batchscheduler/        Application entry point and component wiring
   group/                     Group views, member indexes, and internal states
   informer/                  Resource caches and change notifications
-  staging/                   Attempt records, evaluation, dispatch, and feedback
+  scheduler/                 Shared filter and score contracts
+    executor/                Execution queue, step orchestration, and reporting
+    steps/                   Filtering, placement, reservation, binding, and recovery
+    upstream/                Native Kubernetes filter and score adapters
+  staging/                   Shared messages and Center interface
+    buffer/                  Attempt records, observation, dispatch, and feedback
+    evaluation/              Pure decision stages
     error_engine/            Observed-error mapping and failure handlers
   utils/                     Admission helpers
   workqueue/                 Scheduling units, queues, selection, and transitions
+third_party/kubernetes/      Unmodified native filter source subset
 config/crd/                  PodGroup custom resource definition
 docs/                        Architecture and source-level documentation
 progress.md                  Detailed implementation checkpoints
@@ -185,6 +195,7 @@ progress.md                  Detailed implementation checkpoints
 ## Documentation
 
 - [Buffer: source-level design and tradeoffs](docs/buffer.md) — records, evaluation stages, execution feedback, handoff, and known gaps.
+- [Pod scoring](docs/score.md) — native scoring adapters and the input passed to group planning.
 - [PodGroup and Pod views](docs/podgroup-view.md) — resource relationships and member lookup.
 - [Architecture and implementation progress](progress.md) — current checkpoints and validation boundaries.
 - [Project background and requirements](批任务组调度与失败恢复调度器-背景与需求说明书.md) — project scope and design background.
