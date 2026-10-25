@@ -196,6 +196,8 @@ progress.md                  Detailed implementation checkpoints
 
 - [Buffer: source-level design and tradeoffs](docs/buffer.md) — records, evaluation stages, execution feedback, handoff, and known gaps.
 - [Pod scoring](docs/score.md) — native scoring adapters and the input passed to group planning.
+- [First-version group placement design](docs/group-scoring-design.md) — communication-aware candidate plans, optional resource consolidation, final scoring, and implementation boundaries; not implemented yet.
+- [Communication-aware placement design](docs/communication-semantics.md) — proposed relationship candidates, group plans, degradation rules, and scoring; not implemented yet.
 - [PodGroup and Pod views](docs/podgroup-view.md) — resource relationships and member lookup.
 - [Architecture and implementation progress](progress.md) — current checkpoints and validation boundaries.
 - [Project background and requirements](批任务组调度与失败恢复调度器-背景与需求说明书.md) — project scope and design background.
