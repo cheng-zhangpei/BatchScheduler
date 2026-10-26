@@ -1,10 +1,10 @@
 # 第一版组评分与放置方案
 
-更新日期：2026-10-25。
+更新日期：2026-10-26。
 
-**状态：框架已经讨论确定，组规划算法尚未实现。** 本次提交保存设计文档，不把本地其他代码改动一并提交。
+**状态：通信放置主线及声明透传已形成待 review 的原型，完整组规划尚未完成。** 集中评分、最终汇总及真实资源操作仍待实现。当前链路按 YAML 顺序处理，优先级测试失败，具体问题见[通信放置源码说明](communication-placement.md)。
 
-明天从本文继续。后续一次讨论一个接口或一个方法，由用户主导行为与取舍，再写实现；不一次补完整个规划器。
+后续一次讨论一个接口或一个方法，由用户主导行为与取舍，再写实现；不一次补完整个规划器。
 
 ## 1. 我们已经决定做什么
 
@@ -32,7 +32,9 @@ Assume → Bind
 
 ## 2. 每套候选方案包含什么
 
-概念上的候选列表叫 `[]CandidatePlan`。这是讨论中的名字，本次没有增加 Go 类型。
+候选列表叫 `[]CandidatePlan`，类型位于 [planner/types.go](../src/scheduler/planner/types.go)。
+
+`Placements` 保存 Pod 到节点的映射，`Scores` 分开保存三项评价，`Communication` 保存逐条规则及实际等级，`Notes` 解释方案和通信降级。`Scores.Consolidation=nil` 表示没有资源整合评分结果，不等同于零分。
 
 每套方案要能回答：
 
@@ -59,7 +61,7 @@ Assume → Bind
 - 相关成员的集中偏好。
 - 同组当前已绑定成员的位置，以及可用的跨 Unit 上下文。
 
-通信声明如何进入 CR、端点怎样命名、拓扑等级使用哪些标签，还没有确定。
+2026-10-26 已增加 CR 声明及透传：`spec.placement.communication` 保存链路，`spec.placement.resourceConsolidation` 是资源整合开关。端点引用 Pod 的稳定 `scheduling.batchscheduler.io/member-id` 标签。字段说明见 [PodGroup 与成员关系](podgroup-view.md)，示例见 [podgroup-communication.yaml](../config/examples/podgroup-communication.yaml)。当前通信插件只处理两端都在本轮的关系，具体实现见[通信放置源码说明](communication-placement.md)。
 
 ### 3.2 做什么
 
@@ -105,7 +107,7 @@ node3：完整空闲，剩余 8 CPU
 
 ### 4.2 用户可以选择是否开启
 
-提供一个是否允许内置资源整合优化的开关。字段名称、默认值和具体配置位置留待实现时确定。
+开关为 `spec.placement.resourceConsolidation`，默认关闭；已经传到规划器，有集中插件且用户开启时才调用。具体集中插件仍未实现。
 
 - 关闭：不额外加入这项组级资源整合评价，按用户其他声明的偏好及 Pod 基础评价选择。
 - 开启：对候选方案增加资源整合评价，与通信评价及 Pod 基础评价一起参与选择。
@@ -135,7 +137,7 @@ node3：完整空闲，剩余 8 CPU
 
 如果一套方案通信更好、资源分布也更好，且其他条件相同，应当优先选择它。如果通信和资源各有优劣，就按用户允许的偏好进行权衡，不称其中一套为无条件的“最优”。
 
-分数范围、Pod 分数怎样聚合成方案评价、各项怎样归一化及加权、同分怎样决定，都留到汇总实现时逐项确定。本次定下的是评价组成与处理顺序，没有定下数值公式。
+通信插件目前先用 Pod 基础分求和、通信权重乘实际靠近分来做原始评价，说明见[通信放置源码](communication-placement.md)。最终分数范围、各项归一化与加权、同分怎样决定，仍留到汇总实现时逐项确定。
 
 解释结果时保留各项分数和降级明细，让我们能看到最终为什么选择这套方案。
 
@@ -150,17 +152,21 @@ node3：完整空闲，剩余 8 CPU
 
 ## 7. 实现入口与当前状态
 
-现有步骤入口是 [steps/plan.go](../src/scheduler/steps/plan.go) 的 `PlanGroup`。通信候选、reduce、资源评价和最终汇总，都在组规划这一步内部组织，再返回最终计划。
+现有步骤入口是 [steps/plan.go](../src/scheduler/steps/plan.go) 的 `PlanGroup`，现在调用 [planner.Planner.Plan](../src/scheduler/planner/planner.go)。内部按链路放置、可选集中评分、自动优化预留位置、最终汇总的顺序组织，再返回最终计划。
+
+[planner/plugins.go](../src/scheduler/planner/plugins.go) 先定义两个接口：`LinkPlacementPlugin.Place` 返回多套完整候选方案；`ConcentrationPlugin.Score` 只评价一套方案的资源分布，不修改放置位置。插件在启动前设置，不让 Buffer 协调这些内部环节。
+
+默认已接 communication 插件，用户可通过 Executor.SetPlanner 替换。通信插件返回候选后，最终汇总仍返回 `ErrHandlerUnavailable`，Executor 报告 Blocked，不会开始 Assume 或 Bind。自动优化暂时只有 TODO，没有新接口或后台线程。
 
 Pod 基础分来自 [upstream/score.go](../src/scheduler/upstream/score.go)，基础评分说明见 [Pod Score](score.md)。这次不修改上游插件。
 
-本地已补充完整 Pod、NodeInfo 和跨 Unit 上下文相关代码，但这些改动没有包含在本次文档提交中。GitHub 上的评分输入可能仍只有 Mode 和 PodScores；后续提交实现时再同步代码和源码说明。
+GroupScoreInput 已补充完整 Pod、NodeInfo、冻结的 Placement 声明和跨 Unit 上下文，通信插件从这份输入读取本轮数据。字段定义与源码一并保存在当前 checkpoint 中。
 
-通信配置、CandidatePlan 类型、通信规划、资源整合评分及最终汇总都尚未实现。不能把本文的目标流程当作当前已经跑通的流程。
+通信配置、冻结声明透传及本轮成员的通信规划已实现。跨 Unit 端点解析、资源整合评分及最终汇总都尚未实现，不能把通信候选生成当作整个调度器已经跑通。
 
-## 8. 明天怎么开始
+## 8. 下一小块从哪里开始
 
-先确认本地尚未提交的组输入与上下文改动，然后从**候选方案和评分结果的数据结构**开始。
+下一小块先 review **Place → placeLink → trial.place** 的正常路径和累计资源，再由用户决定集中评分或后续算法调整。源码说明见[通信放置插件](communication-placement.md)，不自动扩展整个规划器。
 
 先把一个问题讲清楚：前一步交给后一步什么，后一步返回什么。确认后再逐个实现链路候选、reduce、方案评价和汇总，不一次展开所有算法。
 

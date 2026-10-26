@@ -18,6 +18,10 @@ func (b *Buffer) applyHandoff(ctx context.Context, d staging.Decision) error {
 	if err != nil {
 		return err
 	}
+	if err := b.archiveSuccess(ctx, d, request.ActionID); err != nil {
+		// 数据没存成，队列还没有动；保留 Record，取消本次等待，允许重试保存。
+		return b.finishHandoff(d, request.ActionID, err)
+	}
 	err = b.handlers.Handoff(ctx, request)
 	return b.finishHandoff(d, request.ActionID, err)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler"
 	"batchscheduler/src/scheduler/upstream"
 	"batchscheduler/src/staging"
@@ -38,6 +39,14 @@ func (r *Runner) Filter(ctx context.Context, a *Attempt) (map[workqueue.PodRef]s
 		return nil, err
 	}
 	a.members, a.filter = pods, single
+	a.boundPeers = nil
+	for _, pod := range assigned {
+		owner, belongs := group.GroupForPod(pod)
+		// 这些位置来自本轮实际集群视图。已删除、已结束的 Pod 只留历史，不再作为运行锚点。
+		if belongs && owner == a.Request.Unit.Group && pod.Spec.NodeName != "" && pod.DeletionTimestamp == nil && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			a.boundPeers = append(a.boundPeers, pod.DeepCopy())
+		}
+	}
 	return results, nil
 }
 

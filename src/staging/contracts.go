@@ -40,13 +40,14 @@ type Handlers struct {
 
 // Execution 是发给执行器的一张任务单，说明本次操作的编号、成员和节点计划。
 type Execution struct {
-	ActionID  string
-	Unit      workqueue.UnitKey
-	Operation Operation
-	Mode      workqueue.SubmitMode // 从冻结 Unit 透传，后续组评分读取它。
-	Members   []workqueue.PodRef
-	Plan      map[workqueue.PodRef]string
-	Failure   *group.FailureInfo
+	ActionID   string
+	Unit       workqueue.UnitKey
+	Operation  Operation
+	Mode       workqueue.SubmitMode // 从冻结 Unit 透传，后续组评分读取它。
+	Definition *group.Definition    // 本轮冻结的组声明；不从最新 CR 临时替换。
+	Members    []workqueue.PodRef
+	Plan       map[workqueue.PodRef]string
+	Failure    *group.FailureInfo
 }
 
 // Handoff 是发给队列处理函数的结束通知：哪个旧 Unit，要回送还是只结束。

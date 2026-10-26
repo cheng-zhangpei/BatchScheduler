@@ -15,7 +15,7 @@ import (
 func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 	for _, mode := range []workqueue.SubmitMode{workqueue.AllTogether, workqueue.AllowPartial} {
 		t.Run(string(mode), func(t *testing.T) {
-			b, view := fixture(mode)
+			b, view := fixture(t, mode)
 			w := workqueue.New()
 			w.Views, w.Staging = b.views, b
 			b.handlers.QueueSnapshot, b.handlers.WaitingGroups = w.GroupSnapshot, w.WaitingGroups
@@ -94,7 +94,7 @@ func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 }
 
 func TestPartialReturnRediscoverUnboundHealthyMembers(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	w := workqueue.New()
 	w.Views, w.Staging = b.views, b
 	b.handlers.Execute = simulatedExecutor(b, view, false)

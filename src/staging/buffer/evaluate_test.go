@@ -66,7 +66,7 @@ func TestEvaluateAttemptDecisions(t *testing.T) {
 		}, staging.ActionWait, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, view := fixture(workqueue.AllTogether)
+			b, view := fixture(t, workqueue.AllTogether)
 			u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 			if err := b.Accept(context.Background(), u); err != nil {
 				t.Fatal(err)
@@ -97,7 +97,7 @@ func TestEvaluateAttemptDecisions(t *testing.T) {
 func TestEvaluateFailureScopeAndIndependentPartialProgress(t *testing.T) {
 	for _, mode := range []workqueue.SubmitMode{workqueue.AllTogether, workqueue.AllowPartial} {
 		t.Run(string(mode), func(t *testing.T) {
-			b, view := fixture(mode)
+			b, view := fixture(t, mode)
 			u := queuedUnit(t, view, "first", mode, 0, 1)
 			if err := b.Accept(context.Background(), u); err != nil {
 				t.Fatal(err)
@@ -128,7 +128,7 @@ func TestEvaluateFailureScopeAndIndependentPartialProgress(t *testing.T) {
 			}
 		})
 	}
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	first := queuedUnit(t, view, "first", workqueue.AllowPartial, 0)
 	second := queuedUnit(t, view, "second", workqueue.AllowPartial, 1)
 	for _, u := range []workqueue.Unit{first, second} {
@@ -147,7 +147,7 @@ func TestEvaluateFailureScopeAndIndependentPartialProgress(t *testing.T) {
 }
 
 func TestEvaluateUnheldGroupAndChangedDeclaration(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	key := view.Members[0].Group
 	ds, err := b.Evaluate(context.Background(), key)
 	if err != nil || len(ds) != 1 || ds[0].Unit != nil || ds[0].Action != staging.ActionSelect {
@@ -168,7 +168,7 @@ func TestEvaluateUnheldGroupAndChangedDeclaration(t *testing.T) {
 }
 
 func TestEvaluateBoundPodCompletionIsNotSchedulingFailure(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	if err := b.Accept(context.Background(), u); err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestEvaluateBoundPodCompletionIsNotSchedulingFailure(t *testing.T) {
 }
 
 func TestEvaluationQueueDeduplicatesAndRequeuesChangesDuringProcessing(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	if err := b.Accept(context.Background(), u); err != nil {
 		t.Fatal(err)

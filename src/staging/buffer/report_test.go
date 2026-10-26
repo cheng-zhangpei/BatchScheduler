@@ -12,7 +12,7 @@ import (
 // 启动一轮但不模拟完成，让每个用例手动报告进度。
 func startReportedRun(t *testing.T) (*Buffer, *group.View, staging.Execution) {
 	t.Helper()
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	var request staging.Execution
 	b.handlers.Execute = func(_ context.Context, r staging.Execution) error { request = r; return nil }

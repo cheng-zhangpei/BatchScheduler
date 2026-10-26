@@ -1,6 +1,48 @@
 # BatchScheduler 架构与进度
 
-更新日期：2026-10-23。以当前代码和本次讨论为准，不使用百分比估算完成度。
+更新日期：2026-10-26。以当前代码和本次讨论为准，不使用百分比估算完成度。
+
+### 2026-10-26 晚：只补做法注释，原型待逐步 review
+
+- 对 Place、链路解析、节点对枚举、累计资源试放、候选去重与布局保留补充具体做法和例子；本轮不扩展算法。
+- **当前已知失败：`TestPlaceAccumulatesSharedEndpointAndDegradesLowerPriority`。resolveLinks 当前按 YAML 顺序处理，没有 Priority 排序；本次按用户选择保留逻辑，标记测试失败，不顺手修复。**
+- 前一轮的全量通过记录是当时的检查点，不代表当前优先级行为已经正确。当前验证结果以本节及本次实际输出为准。
+- 今晚复查 `go test ./src/... -count=1 -timeout=90s`：仅上述优先级用例失败，其余包通过；注释编辑前后 Go 代码 token 一致，没有变更算法逻辑。
+- 明天先从两个 Pod 同节点的最小场景开始，再加共享端点的第二条链路，逐步推导关系顺序、累计资源、降级和候选裁剪。
+- 详细阅读顺序与待推导问题见 [通信放置插件源码说明](docs/communication-placement.md)。这份代码先作为 checkpoint 备份，不要求一次接受所有设计。
+
+以下是本日先前的实现记录。
+
+### 2026-10-26：通信放置主线，先 review 再推进
+
+- PodGroup 增加 placement 声明，链路引用稳定 member-id；CRD、Go 类型和示例同步。
+- Select 为 Unit 保存组声明快照，冻结后不变；Buffer、Execution、Score 将 Placement 副本交给插件。旧声明的自动队列重组仍未完善。
+- planner 定义候选方案和插件接口，plugins/communication 实现本轮成员的候选生成；可通过 Executor.SetPlanner 替换插件。
+- Place 按链路优先级沿 NodeScore 列表试放，累计检查原生资源与 HostPort；共享端点不重复计费，冲突时尝试更远的拓扑范围。
+- 默认保留最多 4 套方案，并保留不同分布形状；补齐未参与链路的本轮成员。有限搜索失败不等于证明全局无解。
+- 原始评价暂用 Pod 基础分求和与通信 weight × 靠近分；候选另保留逐条规则、实际等级和说明。
+- 集中评分、最终归一化与选定、跨 Unit 端点、真实 Assume/Bind、Active 消费仍未实现。Place 产出候选后，执行线仍在最终汇总报告 Blocked。
+- 此阶段的 `go test ./src/... -count=1 -timeout=90s` 曾通过；晚间复查发现优先级排序缺失，当前失败记录见顶部。没有真实集群、网络性能或大规模搜索压测。
+- 阅读入口：[通信放置插件源码说明](docs/communication-placement.md)。下一步先逐函数 review Place → placeLink → trial.place，由用户决定后续实现，不直接扩展所有算法。
+
+以下保留此前检查点，以本节为最新进度。
+
+### 2026-10-25：成功归档与跨 Unit 组信息
+
+- 成功 Release 在队列交接和内存清理前写入 BoltDB；写失败保留 Record。失效清理不存成成功记录。
+- Record 增加独立 ID，数据库按组 UID 和 Record ID 隔离，避免重启后的数字 Unit 编号覆盖历史。
+- GroupContext 查询其他活跃 Unit 和成功历史；PlanGroup 另收到当前绑定的 BoundPeers。历史不冒充当前位置，也不重复计资源。
+- main 已接本地库和读取器，默认 `.batchscheduler/history.db`，支持 `--history-db`。
+- 本次不强制合并冻结 Unit；真实 compaction、运行期失败回调、未完成操作恢复、历史过期清理仍待讨论。
+- `go test ./src/... -count=1 -timeout=90s` 通过；新增关库重开、写入失败、先保存后交接、组 UID 隔离与规划输入测试。
+- 源码说明见 [组上下文与成功记录](docs/group-context.md)。下一步再讨论通信语义。
+
+### 2026-10-25：补齐组规划输入，算法待讨论
+
+- GroupScoreInput 现在包含 Mode、完整 Pods、NodeInfos、各 Pod 的候选评分列表。
+- Pods 使用本轮成员的副本；NodeInfos 从 Filter 固定的节点视图导出，保留已有占用和拓扑，不重新读缓存。
+- NodeInfo 的资源统计可独立试放；它引用的已有 Pod/Node 对象只读，修改前须 DeepCopy。
+- 本次只补输入与说明，不实现组评分、组内试放或组选点算法；PlanGroup 仍保留 TODO。
 
 ### 2026-10-23：接入 Pod Score，组评分待讨论
 

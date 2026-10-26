@@ -198,6 +198,7 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 	if mode != AllTogether && mode != AllowPartial {
 		return fmt.Errorf("未知的组提交模式: %q", mode)
 	}
+	definition := group.DefinitionFor(input.View.Group)
 	// 视图可能包含同名重建的 Pod。先校验全组，再清理尚未冻结单元的旧引用。
 	current := make(map[PodRef]bool, len(input.View.Members))
 	for _, member := range input.View.Members {
@@ -209,6 +210,12 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 	for _, unit := range record.units {
 		if unit.State().Phase != UnitNew || unit.Frozen() || w.isStaged(unit) {
 			continue
+		}
+		// 仍在组装时可以跟随声明更新；已冻结的旧轮次保留原来的配置。
+		if unit.Mode() == mode {
+			if err := unit.SetDefinition(definition); err != nil {
+				return err
+			}
 		}
 		for _, ref := range unit.Members() {
 			if current[ref] {
@@ -261,7 +268,7 @@ func (w *WorkQueue) assemble(input SelectionInput, record *selectionState, key g
 		}
 		if target == nil {
 			var err error
-			target, err = w.newUnit(key, mode)
+			target, err = w.newUnit(key, mode, definition)
 			if err != nil {
 				return err
 			}

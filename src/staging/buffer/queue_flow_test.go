@@ -12,7 +12,7 @@ import (
 
 func queuedFailure(t *testing.T, reason string, recovered bool) (*Buffer, *workqueue.WorkQueue, workqueue.Unit) {
 	t.Helper()
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	w := workqueue.New()
 	w.Views, w.Staging = b.views, b
 	var unit workqueue.Unit

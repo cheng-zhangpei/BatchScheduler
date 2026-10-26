@@ -4,7 +4,9 @@ A group-oriented Kubernetes scheduler built in Go, with explicit scheduling unit
 
 BatchScheduler is being developed as a standalone scheduler inspired by the Kubernetes scheduling architecture. It explores how groups of related Pods can be admitted, tracked, and recovered together while supporting smaller scheduling units where partial progress is appropriate.
 
-**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. The runtime does not yet perform node placement or bind Pods. Native filtering and per-Pod scoring are connected. Group placement, resource reservation, and real binding/recovery remain under development.
+**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. Native filtering, per-Pod scoring, and an experimental communication-aware candidate planner are connected. Final plan selection, resource reservation, and real binding/recovery remain under development; the runtime does not bind Pods.
+
+**Known issue in this checkpoint:** communication relationships currently follow declaration order rather than `priority`. `TestPlaceAccumulatesSharedEndpointAndDegradesLowerPriority` fails and is retained for the next algorithm review.
 
 ## Project Goals
 
@@ -102,9 +104,11 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Per-Pod scoring backed by four native plugins, with sorted candidate lists and submission mode forwarded to group planning.
 - Active/FastRetry FIFO storage and keyed Fail/Retry storage.
 - Center acceptance, observation, staged evaluation, action dispatch, and execution feedback.
-- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results; execution currently stops after native filtering and Pod scoring because group placement is pending.
+- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results; execution stops before final plan selection, which remains pending.
+- PodGroup placement declarations, frozen configuration passed through scheduling units, and a prototype that builds a limited set of communication-aware placements using cumulative resource and port checks.
 - Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
 - Version-checked queue transitions with retry classification and event/backoff conditions.
+- BoltDB-backed successful-attempt history and group context shared across units; current bound peers remain distinct from historical placement.
 - Release and failure-return handoff: completed attempts are removed, and failed members enter a new Fail-queue unit through Select before the Center drops the old record.
 - Retry notifications from node changes, bound-Pod deletion, scheduling-gate removal, and periodic queue checks.
 - Unit and fake-client integration tests for observation, decision generation, queue migration, and simulated execution.
@@ -112,7 +116,7 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 ### In Progress / Planned
 
 - Active/FastRetry consumption and reliable transfer into the Center.
-- Node-placement algorithms and group-aware resource planning.
+- Review of relationship processing order, search behavior, and group placement semantics; resource consolidation scoring and final plan selection.
 - A scheduling resource cache with Assume/Forget semantics.
 - Real binding and recovery executors.
 - Broader failure mapping, operation timeout reconciliation, and restart recovery.
@@ -160,7 +164,7 @@ The process also supports the standard `KUBECONFIG` environment variable and def
 
 At startup, it synchronizes the Pod, Node, and PodGroup caches, logs resource counts, and evaluates observed groups for initial admission. It continues processing observation and retry notifications until interrupted.
 
-**Running this prototype does not schedule or bind Pods.** The executor worker and Report callback are registered; execution performs filtering and Pod scoring but placement, Assume, Bind and resource recovery remain unimplemented. There is no Active-queue consumer yet. Release and failed-attempt handoff are connected. The current runtime reads cluster resources and updates its own in-memory state.
+**Running this prototype does not schedule or bind Pods.** The executor worker and Report callback are registered; execution can generate placement candidates after filtering and Pod scoring, but final selection, Assume, Bind and resource recovery remain unimplemented. There is no Active-queue consumer yet. Release and failed-attempt handoff are connected. The current runtime reads cluster resources and updates its own state. Successful scheduling snapshots are stored in a local BoltDB file (default `.batchscheduler/history.db`, configurable with `--history-db`). In-flight execution recovery and history retention policies remain pending.
 
 ### Build
 
@@ -178,11 +182,14 @@ src/
   informer/                  Resource caches and change notifications
   scheduler/                 Shared filter and score contracts
     executor/                Execution queue, step orchestration, and reporting
+    planner/                 Candidate plans, plugin contracts, and planning flow
+    plugins/                 Concrete group planning plugins
     steps/                   Filtering, placement, reservation, binding, and recovery
     upstream/                Native Kubernetes filter and score adapters
   staging/                   Shared messages and Center interface
     buffer/                  Attempt records, observation, dispatch, and feedback
     evaluation/              Pure decision stages
+    history/                 BoltDB-backed successful-attempt records
     error_engine/            Observed-error mapping and failure handlers
   utils/                     Admission helpers
   workqueue/                 Scheduling units, queues, selection, and transitions
@@ -195,9 +202,11 @@ progress.md                  Detailed implementation checkpoints
 ## Documentation
 
 - [Buffer: source-level design and tradeoffs](docs/buffer.md) — records, evaluation stages, execution feedback, handoff, and known gaps.
+- [Cross-unit context and successful records](docs/group-context.md) — persistence ordering, current versus historical placement, and remaining compaction work.
 - [Pod scoring](docs/score.md) — native scoring adapters and the input passed to group planning.
-- [First-version group placement design](docs/group-scoring-design.md) — communication-aware candidate plans, optional resource consolidation, final scoring, and implementation boundaries; not implemented yet.
-- [Communication-aware placement design](docs/communication-semantics.md) — proposed relationship candidates, group plans, degradation rules, and scoring; not implemented yet.
+- [Communication placement source walkthrough](docs/communication-placement.md) — candidate expansion, cumulative resources, scoring, and the next algorithm review.
+- [First-version group placement design](docs/group-scoring-design.md) — communication-aware candidate plans, optional resource consolidation, and remaining final scoring work.
+- [Communication-aware placement design](docs/communication-semantics.md) — relationship candidates, group plans, degradation rules, and scoring intent.
 - [PodGroup and Pod views](docs/podgroup-view.md) — resource relationships and member lookup.
 - [Architecture and implementation progress](progress.md) — current checkpoints and validation boundaries.
 - [Project background and requirements](批任务组调度与失败恢复调度器-背景与需求说明书.md) — project scope and design background.

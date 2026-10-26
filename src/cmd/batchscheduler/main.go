@@ -14,6 +14,7 @@ import (
 	execution "batchscheduler/src/scheduler/executor"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/staging/buffer"
+	"batchscheduler/src/staging/history"
 	"batchscheduler/src/utils"
 	"batchscheduler/src/workqueue"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,6 +35,7 @@ func run() error {
 	// 使用 client-go 默认加载规则：--kubeconfig、KUBECONFIG 或 ~/.kube/config。
 	loading := clientcmd.NewDefaultClientConfigLoadingRules()
 	flag.StringVar(&loading.ExplicitPath, "kubeconfig", "", "连接虚拟机集群的 kubeconfig 路径")
+	historyPath := flag.String("history-db", ".batchscheduler/history.db", "调度成功记录的本地 BoltDB 文件")
 	flag.Parse()
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loading, &clientcmd.ConfigOverrides{}).ClientConfig()
 	if err != nil {
@@ -54,10 +56,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	store, err := history.Open(*historyPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			slog.Error("关闭成功记录数据库失败", "error", err)
+		}
+	}()
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
 	executor := execution.NewExecutor(observed.GroupViews, observed.Nodes, observed.Pods)
-	center := buffer.NewBuffer(observed.GroupViews, newStagingHandlers(queues, observed.Nodes, executor))
+	center := buffer.NewBuffer(observed.GroupViews, store, newStagingHandlers(queues, observed.Nodes, executor))
+	executor.SetGroupContextReader(center)
 	executor.Report = center.Report
 	queues.Staging = center
 	if err := observed.OnRetryChange(center.NotifyRetry); err != nil {

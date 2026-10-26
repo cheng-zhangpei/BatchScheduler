@@ -8,12 +8,15 @@ import (
 
 // newUnit 创建一个尚未登记、尚未入队的空单元。普通组装和失败回送共用它。
 // 调用时已持有 selectMu，保证编号不会重复。
-func (w *WorkQueue) newUnit(key group.Key, mode SubmitMode) (Unit, error) {
+func (w *WorkQueue) newUnit(key group.Key, mode SubmitMode, definition *group.Definition) (Unit, error) {
 	w.nextID++
 	unitKey := UnitKey{Group: key, ID: fmt.Sprintf("unit-%d", w.nextID)}
 	unit := w.MakeUnit(unitKey, mode)
 	if unit == nil || unit.Key() != unitKey || unit.Mode() != mode || unit.State().Phase != UnitNew || len(unit.Members()) != 0 {
 		return nil, fmt.Errorf("单元工厂必须返回身份和模式匹配的组装中空单元")
+	}
+	if err := unit.SetDefinition(definition); err != nil {
+		return nil, err
 	}
 	return unit, nil
 }

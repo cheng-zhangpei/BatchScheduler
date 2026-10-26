@@ -4,7 +4,7 @@
 
 ## 两类对象的职责
 
-- PodGroup CR：`scheduling.batchscheduler.io/v1alpha1`，namespace 级别。当前只有 `spec.members`，表示期望成员总数，要求为正数。没有 Pod 模板、minMember、重试策略和运行状态字段。
+- PodGroup CR：`scheduling.batchscheduler.io/v1alpha1`，namespace 级别。`spec.members` 表示期望成员总数，`spec.submitMode` 表示提交模式，可选的 `spec.placement` 声明通信关系及资源整合偏好。没有 Pod 模板、minMember、重试策略和运行状态字段。
 - Pod：保存成员完整的 spec 和运行事实。未来由 operator 根据组的声明创建、维护，调度器不创建成员。
 
 CRD 在 `config/crd/scheduling.batchscheduler.io_podgroups.yaml`，Go 数据定义在 `src/apis/scheduling/v1alpha1/types.go`。目前通过 dynamic client 读取 CR，再转成 Go 结构；尚未生成 typed clientset，也不需要把这个 Go 结构注册成 runtime.Object。operator 的完整 API 与代码生成在后续阶段设计。
@@ -23,6 +23,27 @@ operator 创建 Pod 时，应设置指向 PodGroup 的 controller ownerReference
 调度器以 namespace 和组 UID 建立成员索引，查询时同时核对组名。组删除后同名重建会得到新 UID，旧 Pod 不会自动归入新组。不依据同名、相似 spec 或标签猜测成员关系；没有有效组引用的 Pod 仍保留在普通 Pod 缓存中，供以后观察资源占用。
 
 operator 负责写入这份关系，调度器负责读取并识别关系。无需让两者各自维护一份独立成员清单。
+
+## 通信关系怎样引用成员
+
+2026-10-26 增加配置结构，示例见 [podgroup-communication.yaml](../config/examples/podgroup-communication.yaml)，Go 定义见 [placement.go](../src/apis/scheduling/v1alpha1/placement.go)。
+
+成员 Pod 使用 `scheduling.batchscheduler.io/member-id` 标签表达稳定身份，例如 `worker-0`。Operator 重建 Pod 时保留该值。通信关系的 `from`、`to` 引用这个值；实际执行仍使用 Pod 名称与 UID 区分本次对象。
+
+标签只用于组内通信端点，不改变 ownerReference 的组归属规则。相同 member-id 可以出现在不同 Group 内。
+
+| 字段 | 含义 |
+| --- | --- |
+| placement.communication[].name | 关系名称，在本组中唯一 |
+| from、to | 同组两端的稳定成员标签值 |
+| preferredLevel | 希望同 Node、Rack、Zone 或 Cluster；冲突时允许扩大范围 |
+| weight | 正数，表达通信评分的重要程度，可以相同 |
+| priority | 数值越大越优先保住；较小的先降级，与 Pod 优先级无关 |
+| placement.resourceConsolidation | 是否启用额外的组级资源整合评价，默认关闭 |
+
+声明已沿 Unit → Execution → GroupScoreInput 透传，本轮通信端点可按稳定标签解析。Unit 保存冻结的组声明副本；排队后声明变化时，Accept 会拒绝旧轮次，自动重组旧队列任务还待完善。重复标签和完整关系校验、跨 Unit 端点解析继续后置。
+
+当前通信插件的 RackLabel 默认 `scheduling.batchscheduler.io/rack`，可由启动配置替换；ZoneLabel 默认 `topology.kubernetes.io/zone`。没有标签时不假定同域。源码说明见[通信放置插件](communication-placement.md)。
 
 ## 本地视图如何建立
 

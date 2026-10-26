@@ -42,7 +42,7 @@ type Center interface {
 	// 真实执行器完成后再调用 Report；Apply 返回 nil 不代表 Pod 已经绑定。
 	Apply(context.Context, Decision) error
 
-	// Release 先确认本轮可以结束，再让队列清掉旧关联，最后删除 Buffer 的记录。
+	// Release 先确认本轮可以结束；调度成功先归档，再清队列旧关联和内存记录。
 	// 它不删除 Pod/CR，也不撤销资源预占；这些工作必须先由执行器处理完。
 	Release(context.Context, workqueue.UnitKey) error
 

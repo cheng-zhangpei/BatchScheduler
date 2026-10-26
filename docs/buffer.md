@@ -1,6 +1,6 @@
 # Buffer 源码阅读说明
 
-更新日期：2026-10-23。本文按当前源码说明实际行为；“还没实现”会明确写出来。
+更新日期：2026-10-25。本文按当前源码说明实际行为；“还没实现”会明确写出来。
 
 ## 1. 先记住 Buffer 在做什么
 
@@ -33,7 +33,7 @@ informer：持续读取集群中的组和 Pod，告诉 Buffer 实际发生了什
 | 退避时间到 → 再次评估 | main 每秒通知检查 Fail/Retry |
 | Active.Pop → Accept 的主循环 | **尚未实现**；测试中直接调用 |
 | Apply → Execute → Report | 已接独立执行队列、内部 Filter/Pod Score 和持续 Report；组选点和真实资源操作待实现 |
-| 成功结束 → 解除队列旧关联 → 删除 Buffer 记录 | 已接 Handoff 的 Release 分支，队列处理函数为 WorkQueue.ReleaseUnit |
+| 成功结束 → BoltDB 归档 → 解除队列旧关联 → 删除活跃 Record | 已接，写库失败时保留活跃记录；失效清理不写成成功历史 |
 | 失败恢复后 → 创建下一轮并回队列 | 已接 Handoff 的 Return 分支，通过 SelectRequest.Return 组装新 Unit 并放入 Fail |
 | compaction、FastRetry 准入、容量限制、Pending 超时核查 | **尚未实现** |
 
@@ -497,7 +497,7 @@ Finished 只代表执行器确认本轮结束，Observed 仍由 informer 更新�
 
 `ResponsibilitiesSettled=true` 是执行器的明确承诺，不是这个 bool 自己释放了资源。真实资源缓存还没实现。有真实资源的恢复也不能靠清标记冒充。
 
-Report 只保留最近一份 Feedback；Record 删除后再来的反馈会报“记录不存在”，没有跨重启存档。Report 调用失败时，Executor 停在当前进度，不把汇报错误当成调度失败去追加资源操作。
+Report 只保留最近一份 Feedback；活跃 Record 删除后，迟到反馈仍报“记录不存在”。成功历史现已存入 BoltDB，但没有实现迟到反馈处理或未完成操作的跨重启恢复。Report 调用失败时，Executor 停在当前进度，不把汇报错误当成调度失败去追加资源操作。
 
 ## 15. Handoff 到底在处理什么
 
@@ -526,6 +526,7 @@ U 是通过 WorkQueue.Select 创建的，WorkQueue 内部还记着：A、B 属�
 ```text
 执行器已确认绑定和资源收尾完成
 → Evaluate 产生 Release
+→ archiveSuccess 保存成功快照到 BoltDB，失败则保留 Record
 → Apply.applyHandoff 调用队列侧函数
 → WorkQueue.ReleaseUnit 清掉旧 U 的关联
 → Handoff 返回 nil，表示已经处理好
@@ -604,7 +605,7 @@ Record.Revision 和 UnitState.Revision 不应该要求数值相等：它们数�
 
 当前队列版本也不是完整事件历史版本：Retry.ChangeObserved 变化、直接修改队列条目等不是全都使 UnitState.Revision 增加。因此只能说已有生命周期版本核对，不能说所有跨组件一致性已经解决。
 
-所有这些记录和 ActionID 当前都在进程内。重启后不会恢复尚未完成的操作，需要后续专门设计。
+Record 的独立 ID 与成功快照会写入 BoltDB；尚未完成的操作和 ActionID 仍在进程内，重启后不会自动恢复。
 
 ## 17. 时钟和 informer 怎样触发队列迁移
 
@@ -679,7 +680,7 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 | 一条组通知去重队列 | 不给每个 Pod 事件开线程，可以合并重复通知 | 多个 Unit 仍分别决策，不等于联合调度 |
 | 一个评估线程 | 当前控制流程容易推理 | 外部函数若耗时不返回，会挡住其他组 |
 | 未知结果先等待 | 避免重复绑定、重复入队 | Pending 缺少超时核查，可能长期保留 |
-| 完成后删除 Record | 不为结束任务无限保存历史 | 没有长期查询历史；重启后也不恢复本轮执行 |
+| 成功先落盘，再删除活跃 Record | 释放内存同时保留跨 Unit 的成功位置 | BoltDB 可跨重启查询；历史淘汰、未完成操作恢复尚未实现 |
 | Handler 通过函数字段提供 | Buffer 不直接依赖执行组件 | Handoff 和 Execute/Report 入口已接，具体执行阶段待实现 |
 | 匹配标准 Pod 调度条件 | 原生异常终于能进入内部错误引擎 | 不是所有 Reason 的完整词典，也没有完整的新旧轮次判断 |
 
@@ -719,3 +720,7 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 以后一次只选一个函数或一条错误规则：先由你说明希望输入什么、返回什么，我们讨论取舍，再写代码和检查。注释应直接回答“这一步做什么”和“如果省掉，会发生哪个具体问题”。
 
 需要讨论的下一块由你决定；不因为这里列出缺口就自动开始整段实现。
+
+## 22. 跨 Unit 的组上下文与成功归档
+
+2026-10-25 新增：GroupContext 汇总其他活跃 Unit 和 BoltDB 成功历史；组规划另从本轮集群视图获取 BoundPeers。成功先落盘再清理内存，冻结 Unit 不强制合并。源文件和边界见 [组上下文与成功记录](group-context.md)。

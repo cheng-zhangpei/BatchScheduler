@@ -10,7 +10,7 @@ import (
 )
 
 func TestReleaseHandoffWithRealWorkQueue(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	w := workqueue.New()
 	w.Views, w.Staging = b.views, b
 	if err := w.Select(workqueue.SelectRequest{View: view}); err != nil {

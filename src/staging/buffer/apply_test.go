@@ -68,7 +68,7 @@ func simulatedExecutor(b *Buffer, view *group.View, fail bool) func(context.Cont
 }
 
 func TestApplyMockSuccessClosesCenterAndReleasesIndexes(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	b.handlers.Execute = simulatedExecutor(b, view, false)
 	handoffs := 0
@@ -102,7 +102,7 @@ func TestApplyMockSuccessClosesCenterAndReleasesIndexes(t *testing.T) {
 func TestApplyMockFailureRecoveryAndReturn(t *testing.T) {
 	for _, mode := range []workqueue.SubmitMode{workqueue.AllTogether, workqueue.AllowPartial} {
 		t.Run(string(mode), func(t *testing.T) {
-			b, view := fixture(mode)
+			b, view := fixture(t, mode)
 			indices := []int{0}
 			if mode == workqueue.AllTogether {
 				indices = append(indices, 1)
@@ -140,7 +140,7 @@ func TestApplyMockFailureRecoveryAndReturn(t *testing.T) {
 }
 
 func TestApplyRejectsStaleAndConcurrentDuplicateDispatch(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	var calls atomic.Int32
 	b.handlers.Execute = func(context.Context, staging.Execution) error { calls.Add(1); return nil }
@@ -174,7 +174,7 @@ func TestApplyRejectsStaleAndConcurrentDuplicateDispatch(t *testing.T) {
 		t.Fatal("未反馈的操作应等待")
 	}
 
-	b2, v2 := fixture(workqueue.AllTogether)
+	b2, v2 := fixture(t, workqueue.AllTogether)
 	u2 := queuedUnit(t, v2, "unit", workqueue.AllTogether, 0, 1)
 	b2.handlers.Execute = b.handlers.Execute
 	if err := b2.Accept(context.Background(), u2); err != nil {
@@ -188,7 +188,7 @@ func TestApplyRejectsStaleAndConcurrentDuplicateDispatch(t *testing.T) {
 }
 
 func TestApplyUnknownBindingAndSettlementKeepResponsibility(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	var binding staging.Execution
 	b.handlers.Execute = func(ctx context.Context, req staging.Execution) error {
@@ -258,7 +258,7 @@ func TestApplyUnknownBindingAndSettlementKeepResponsibility(t *testing.T) {
 }
 
 func TestApplyGroupSelectionUsesRealWorkQueue(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	w := workqueue.New()
 	w.Views, w.Staging = b.views, b
 	b.handlers.SelectGroup = func(_ context.Context, v *group.View) error { return w.Select(workqueue.SelectRequest{View: v}) }

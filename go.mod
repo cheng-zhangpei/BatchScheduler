@@ -3,6 +3,7 @@ module batchscheduler
 go 1.24.0
 
 require (
+	go.etcd.io/bbolt v1.4.3
 	k8s.io/api v0.34.7
 	k8s.io/apimachinery v0.34.7
 	k8s.io/apiserver v0.34.7

@@ -57,7 +57,8 @@ func (b *Buffer) ConfirmHandoff(ctx context.Context, key workqueue.UnitKey, acti
 	return nil
 }
 
-// removeRecord 真正删除本轮执行记录、Pod → Unit 关联和组内 Unit 编号。
+// removeRecord 删除活跃区的本轮记录、Pod → Unit 关联和组内 Unit 编号。
+// 成功记录已在队列交接前保存到 history；这里不会删除磁盘上的成功快照。
 // 调用前必须确认队列处理已完成；它不删除集群里的 Pod，也不释放节点资源。
 // 调用者已经保护好这些 map，所以这里不再自己申请锁。
 func (b *Buffer) removeRecord(key workqueue.UnitKey) {

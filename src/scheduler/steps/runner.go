@@ -2,6 +2,8 @@
 package steps
 
 import (
+	"batchscheduler/src/scheduler/planner"
+	"batchscheduler/src/scheduler/plugins/communication"
 	"batchscheduler/src/scheduler/upstream"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
@@ -11,13 +13,15 @@ import (
 
 // Runner 持有步骤需要的数据读取器。Executor 直接调用它的方法。
 type Runner struct {
-	views workqueue.GroupViewReader
-	nodes corelisters.NodeLister
-	pods  corelisters.PodLister
+	Groups  staging.GroupContextReader // 启动前接入 Buffer，查询同组其他轮次。
+	Planner planner.Planner            // 默认接通信候选生成；集中评分和最终汇总待实现。
+	views   workqueue.GroupViewReader
+	nodes   corelisters.NodeLister
+	pods    corelisters.PodLister
 }
 
 func NewRunner(views workqueue.GroupViewReader, nodes corelisters.NodeLister, pods corelisters.PodLister) *Runner {
-	return &Runner{views: views, nodes: nodes, pods: pods}
+	return &Runner{views: views, nodes: nodes, pods: pods, Planner: planner.Planner{Placement: communication.New()}}
 }
 
 // Attempt 是正在执行的这一轮，执行结束后不长期保存。
@@ -29,6 +33,7 @@ type Attempt struct {
 	Binding  bool // 已发出绑定，但还没有确认全部结果。
 
 	// Filter 保存本轮成员和节点视图，Score 直接复用，不再读取另一份缓存。
-	members []*corev1.Pod
-	filter  *upstream.PodFilter
+	members    []*corev1.Pod
+	filter     *upstream.PodFilter
+	boundPeers []*corev1.Pod
 }

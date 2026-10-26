@@ -45,7 +45,7 @@ func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 	}
 
 	// 先在局部准备下一轮。工厂或 Unit 方法报错时，旧记录和实际队列都还没动。
-	next, err := w.newUnit(request.Previous.Group, old.Mode())
+	next, err := w.newUnit(request.Previous.Group, old.Mode(), group.DefinitionFor(view.Group))
 	if err != nil {
 		return err
 	}

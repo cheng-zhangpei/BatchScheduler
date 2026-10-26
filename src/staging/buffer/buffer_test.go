@@ -3,11 +3,13 @@ package buffer
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	scheduling "batchscheduler/src/apis/scheduling/v1alpha1"
 	"batchscheduler/src/group"
+	"batchscheduler/src/staging/history"
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,7 +20,7 @@ type testViews struct{ view *group.View }
 
 func (v testViews) Get(string, string) (*group.View, error) { return v.view, nil }
 
-func fixture(mode workqueue.SubmitMode) (*Buffer, *group.View) {
+func fixture(t *testing.T, mode workqueue.SubmitMode) (*Buffer, *group.View) {
 	key := group.Key{Namespace: "work", Name: "job", UID: "group-uid"}
 	view := &group.View{Group: &scheduling.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, UID: key.UID},
@@ -32,12 +34,15 @@ func fixture(mode workqueue.SubmitMode) (*Buffer, *group.View) {
 		}, Status: corev1.PodStatus{Phase: corev1.PodPending}}
 		view.Members = append(view.Members, group.PodView{Group: key, Pod: pod})
 	}
-	return NewBuffer(testViews{view}), view
+	return NewBuffer(testViews{view}, testHistory(t)), view
 }
 
 func queuedUnit(t *testing.T, view *group.View, id string, mode workqueue.SubmitMode, indices ...int) workqueue.Unit {
 	t.Helper()
 	u := workqueue.NewUnit(workqueue.UnitKey{Group: view.Members[0].Group, ID: id}, mode)
+	if err := u.SetDefinition(group.DefinitionFor(view.Group)); err != nil {
+		t.Fatal(err)
+	}
 	for _, i := range indices {
 		pod := view.Members[i].Pod
 		if err := u.AddMember(workqueue.PodRef{Name: pod.Name, UID: pod.UID}); err != nil {
@@ -54,7 +59,7 @@ func queuedUnit(t *testing.T, view *group.View, id string, mode workqueue.Submit
 }
 
 func TestAcceptPartialLinksSeparateUnits(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	first := queuedUnit(t, view, "first", workqueue.AllowPartial, 0)
 	second := queuedUnit(t, view, "second", workqueue.AllowPartial, 1)
 	for _, u := range []workqueue.Unit{first, second, first} {
@@ -86,7 +91,7 @@ func TestAcceptRejectsConflictsWithoutPartialWrites(t *testing.T) {
 			if kind == "atomic-second" || kind == "mode-changed-with-old-atomic" {
 				mode, indices = workqueue.AllTogether, []int{0, 1}
 			}
-			b, view := fixture(mode)
+			b, view := fixture(t, mode)
 			first := queuedUnit(t, view, "first", mode, indices...)
 			if err := b.Accept(context.Background(), first); err != nil {
 				t.Fatal(err)
@@ -117,7 +122,7 @@ func TestAcceptValidatesCurrentFacts(t *testing.T) {
 			if kind == "atomic-incomplete" {
 				mode = workqueue.AllTogether
 			}
-			b, view := fixture(mode)
+			b, view := fixture(t, mode)
 			u := queuedUnit(t, view, "first", mode, 0)
 			ctx := context.Background()
 			switch kind {
@@ -159,7 +164,7 @@ func TestAcceptValidatesCurrentFacts(t *testing.T) {
 }
 
 func TestAcceptConcurrentMemberOwnership(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	var wg sync.WaitGroup
 	results := make(chan error, 16)
 	for i := 0; i < 16; i++ {
@@ -178,4 +183,14 @@ func TestAcceptConcurrentMemberOwnership(t *testing.T) {
 	if success != 1 || len(b.records) != 1 || len(b.owners[view.Members[0].Group]) != 1 {
 		t.Fatalf("同一成员并发接收应只成功一次，实际 %d", success)
 	}
+}
+
+func testHistory(t *testing.T) *history.Store {
+	t.Helper()
+	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }

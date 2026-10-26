@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"batchscheduler/src/scheduler/planner"
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
@@ -29,6 +30,16 @@ type executionKey struct {
 
 func NewExecutor(views workqueue.GroupViewReader, nodes corelisters.NodeLister, pods corelisters.PodLister) *Executor {
 	return &Executor{steps: steps.NewRunner(views, nodes, pods), requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
+}
+
+// SetGroupContextReader 在启动前接入 Buffer，让组规划能查到同组其他轮次与成功历史。
+func (e *Executor) SetGroupContextReader(reader staging.GroupContextReader) {
+	e.steps.Groups = reader
+}
+
+// SetPlanner 在启动前替换组规划插件；用户实现 planner 中的接口后，通过这里接入。
+func (e *Executor) SetPlanner(p planner.Planner) {
+	e.steps.Planner = p
 }
 
 // Execute 快速接收一次请求，不在 Apply 的评估线程里等待过滤或绑定。
@@ -93,6 +104,7 @@ func (e *Executor) Run(ctx context.Context) error {
 }
 
 func copyExecution(request staging.Execution) staging.Execution {
+	request.Definition = request.Definition.DeepCopy()
 	request.Members = append([]workqueue.PodRef(nil), request.Members...)
 	if request.Plan != nil {
 		plan := make(map[workqueue.PodRef]string, len(request.Plan))

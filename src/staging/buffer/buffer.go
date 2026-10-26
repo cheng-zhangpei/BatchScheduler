@@ -3,6 +3,7 @@ package buffer
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 
 	"batchscheduler/src/group"
@@ -10,6 +11,7 @@ import (
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	clientqueue "k8s.io/client-go/util/workqueue"
 )
 
@@ -21,6 +23,7 @@ type Buffer struct {
 	// 一次只允许一个 Observe 读缓存并写回，避免先读到的旧信息反而后写进去。
 	observeMu   sync.Mutex
 	views       workqueue.GroupViewReader
+	history     staging.SuccessHistory
 	records     map[workqueue.UnitKey]*staging.Record         // Unit 编号 → 执行记录。
 	groups      map[group.Key]map[workqueue.UnitKey]struct{}  // 组编号 → Buffer 中的 Unit 编号集合。
 	owners      map[group.Key]map[types.UID]workqueue.UnitKey // 组编号 + Pod UID → 正在处理它的 Unit。
@@ -34,7 +37,7 @@ type Buffer struct {
 
 // NewBuffer 建好 map 和评估通知队列，保存外部函数。它不会自动开始执行任务。
 // views 通常是 group.Store，Get 只读本地 informer 缓存，不应发网络请求。
-func NewBuffer(views workqueue.GroupViewReader, handlers ...staging.Handlers) *Buffer {
+func NewBuffer(views workqueue.GroupViewReader, history staging.SuccessHistory, handlers ...staging.Handlers) *Buffer {
 	var effects staging.Handlers
 	if len(handlers) > 0 {
 		effects = handlers[0]
@@ -42,6 +45,7 @@ func NewBuffer(views workqueue.GroupViewReader, handlers ...staging.Handlers) *B
 	return &Buffer{
 		retryHints: make(map[workqueue.UnitKey]retryHint),
 		handlers:   effects,
+		history:    history,
 		views:      views, records: make(map[workqueue.UnitKey]*staging.Record),
 		groups:      make(map[group.Key]map[workqueue.UnitKey]struct{}),
 		owners:      make(map[group.Key]map[types.UID]workqueue.UnitKey),
@@ -108,6 +112,11 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err := validateAdmission(view, key.Group, mode, refs); err != nil {
 		return err
 	}
+	definition := unit.Definition()
+	// 排队后用户可能修改了通信偏好。不能拿旧 Unit 的配置配上新版组声明继续执行。
+	if definition == nil || definition.Generation != view.Group.Generation || !reflect.DeepEqual(definition.Spec, view.Group.Spec) {
+		return fmt.Errorf("Accept 组声明已变化或 Unit 未保存声明，需重新组装")
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -138,7 +147,7 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	}
 
 	// 前面只检查。从这里开始一起登记进度、组内编号和 Pod 处理关系。
-	record := &staging.Record{Unit: unit, Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1, Generation: view.Group.Generation}
+	record := &staging.Record{ID: string(uuid.NewUUID()), Unit: unit, Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1, Generation: definition.Generation}
 	// 把 Unit 标为正在处理；它是否真的从队列取出，仍由调用者保证。
 	if err := unit.MarkProcessing(); err != nil {
 		return err

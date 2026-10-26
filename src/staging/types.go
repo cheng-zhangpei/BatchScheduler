@@ -95,6 +95,7 @@ type Decision struct {
 // 它由 Accept 创建，本轮结束后删除，不保存 Group 的完整历史。
 // PendingAction 为空只说明当前没在等某个操作，不代表已经完成所有收尾。
 type Record struct {
+	ID            string // 本轮 Record 的唯一编号，成功归档时沿用，避免重启后的 Unit 编号重复。
 	Unit          workqueue.Unit
 	Members       map[workqueue.PodRef]group.PodState
 	PendingAction string         // 正在等哪个操作，例如 action-3；空字符串表示没有。

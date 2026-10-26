@@ -1,8 +1,10 @@
 # 通信语义：从通信关系到组放置方案
 
-更新日期：2026-10-25。
+更新日期：2026-10-26。
 
-本文记录已经讨论的通信规划框架，**尚未实现**。当前代码完成了 Pod Filter 和 Pod Score；[PlanGroup](../src/scheduler/steps/plan.go) 仍是 TODO。
+本文记录已经讨论的通信规划框架。2026-10-26 本地已实现本轮成员的通信候选生成，源码说明见[通信放置插件](communication-placement.md)。完整 PlanGroup 的集中评分和最终汇总仍待实现。
+
+当前源码按 YAML 顺序处理链路，尚未落实本文约定的 Priority 排序；已有对应测试失败。这次保留原状，作为下一次逐步 review 的起点。
 
 这次先确定输入、输出和处理顺序。搜索算法、评分公式和后台搜索方式以后再优化，不在这次设计中展开实现。
 
@@ -60,7 +62,7 @@
 
 期望靠近等级和集中偏好也有区别：前者描述一条关系希望有多近，后者影响整套方案把相关成员集中在多大的范围内。
 
-成员在声明中如何命名、CR 字段如何组织、机架等拓扑信息用哪些标签，尚未确定。当前 PodGroup API 和 GroupScoreInput 还没有完整的通信声明，不能把本文当成已经支持的配置格式。
+2026-10-26 已增加 `spec.placement.communication`，端点引用同组 Pod 的稳定 `scheduling.batchscheduler.io/member-id` 标签值。字段及示例见 [PodGroup 与成员关系](podgroup-view.md)。配置已传到 GroupScoreInput，本轮成员端点解析和可配置的拓扑标签映射已接入。
 
 ## 4. 已经确定的两条规则
 
@@ -182,7 +184,7 @@ Assume → Bind
 
 ## 8. 对应到现在的源码
 
-输入入口是 [scheduler/score.go](../src/scheduler/score.go) 的 `GroupScoreInput`。下表说明本设计需要的数据；完整 Pod、NodeInfo、跨 Unit 上下文相关补充目前在本地工作区，未包含在本次文档提交中。GitHub 上的字段以实际提交的源码为准。
+输入入口是 [scheduler/score.go](../src/scheduler/score.go) 的 `GroupScoreInput`。完整 Pod、NodeInfo、冻结的 Placement 声明和跨 Unit 上下文已放入当前输入，以下按字段说明用途。
 
 | 字段 | 本层如何使用 |
 | --- | --- |
@@ -190,14 +192,15 @@ Assume → Bind
 | PodScores | 每个 Pod 通过 Filter 后的节点候选和基础分 |
 | NodeInfos | 本轮资源与拓扑视图，供试放使用 |
 | Mode | 保留本轮的提交模式，不在通信层改写 Unit 成员 |
+| Placement | 冻结组声明中的通信关系、权重、优先级及资源整合开关 |
 | BoundPeers | 同组当前已绑定成员的位置参照 |
 | Context | 同组其他 Unit 的进度、计划及历史记录 |
 
-BoundPeers 已在 NodeInfo 的已有 Pod 占用中，不能为了计算组关系再次扣减资源。成功历史用于了解过去的位置，不等于成员现在仍在那里；其他 Unit 的计划也不能直接当成已绑定事实。相关上下文与归档实现将随后续代码提交同步。
+BoundPeers 已在 NodeInfo 的已有 Pod 占用中，不能为了计算组关系再次扣减资源。成功历史用于了解过去的位置，不等于成员现在仍在那里；其他 Unit 的计划也不能直接当成已绑定事实。相关实现见[组上下文与成功记录](group-context.md)。
 
 当前 `PlanGroup` 对外仍返回最终 `map[PodRef]string`。未来的候选生成、通信评价和其他语义评价，放在该步骤内部组织；最终选出的方案再转换成这个计划交回 Executor。
 
-本文没有增加 CandidatePlan 类型、通信插件接口、CR 字段或新线程，也没有修改执行流程。
+本地已增加 CandidatePlan、插件实现目录、CR 配置透传和本轮通信放置主线，没有后台搜索线程。跨 Unit 端点、集中评分和最终汇总仍待实现。
 
 ## 9. 本轮确定与后续再定
 
@@ -213,7 +216,7 @@ BoundPeers 已在 NodeInfo 的已有 Pod 占用中，不能为了计算组关系
 
 后续再定：
 
-- 通信声明的 CR 结构、端点命名和拓扑等级。
+- 组声明的快照透传、成员端点解析和拓扑等级到节点标签的映射。
 - reduce 的具体搜索算法、候选数量和时间预算。
 - 评分公式、不同语义之间的分数合并方式。
 - 后台搜索、运行后重新优化及 Agent 介入方式。

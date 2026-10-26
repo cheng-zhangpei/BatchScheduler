@@ -15,7 +15,7 @@ var (
 )
 
 // PodGroup 声明组，operator 负责创建成员 Pod，调度器只观察此声明。
-// 当前仅描述固定成员数，不提前加入模板、重试策略或运行状态机。
+// 描述成员数、提交模式和组放置偏好；不在这里加入 Pod 模板或运行状态机。
 type PodGroup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -27,4 +27,11 @@ type PodGroupSpec struct {
 	Members int32 `json:"members"`
 	// SubmitMode 声明整组提交或允许部分提交，缺省按 AllTogether 解释。
 	SubmitMode string `json:"submitMode,omitempty"`
+	// Placement 是用户声明的组放置偏好；省略时不增加通信或资源整合要求。
+	Placement *PlacementSpec `json:"placement,omitempty"`
+}
+
+func (s PodGroupSpec) DeepCopy() *PodGroupSpec {
+	s.Placement = s.Placement.DeepCopy()
+	return &s
 }

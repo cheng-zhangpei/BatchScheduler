@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	execution "batchscheduler/src/scheduler/executor"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/staging/buffer"
+	"batchscheduler/src/staging/history"
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -51,7 +53,13 @@ func executorFixture(t *testing.T) (*buffer.Buffer, workqueue.Unit, *execution.E
 	executor := execution.NewExecutor(reader, nodeLister, corelisters.NewPodLister(pods))
 	w := workqueue.New()
 	w.Views = reader
-	b := buffer.NewBuffer(reader, newStagingHandlers(w, nodeLister, executor))
+	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	b := buffer.NewBuffer(reader, store, newStagingHandlers(w, nodeLister, executor))
+	executor.SetGroupContextReader(b)
 	executor.Report, w.Staging = b.Report, b
 	runCtx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)

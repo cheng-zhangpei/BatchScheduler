@@ -41,3 +41,57 @@ spec:
                   enum:
                     - AllTogether
                     - AllowPartial
+                placement:
+                  type: object
+                  description: Group placement preferences; omitted for the existing default behavior.
+                  properties:
+                    resourceConsolidation:
+                      type: boolean
+                      default: false
+                      description: Enable additional group-level resource consolidation scoring.
+                    communication:
+                      type: array
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys:
+                        - name
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - from
+                          - to
+                          - preferredLevel
+                          - weight
+                          - priority
+                        properties:
+                          name:
+                            type: string
+                            minLength: 1
+                            description: Unique communication relationship name within the group.
+                          from:
+                            type: string
+                            minLength: 1
+                            maxLength: 63
+                            description: Value of the source Pod's scheduling.batchscheduler.io/member-id label.
+                          to:
+                            type: string
+                            minLength: 1
+                            maxLength: 63
+                            description: Value of the destination Pod's scheduling.batchscheduler.io/member-id label.
+                          preferredLevel:
+                            type: string
+                            enum:
+                              - Node
+                              - Rack
+                              - Zone
+                              - Cluster
+                            description: Preferred proximity level; placement may fall back to a wider domain.
+                          weight:
+                            type: integer
+                            format: int32
+                            minimum: 1
+                            description: Relative contribution to communication scoring; equal weights are allowed.
+                          priority:
+                            type: integer
+                            format: int32
+                            description: Higher values protect the relationship from being degraded first; unrelated to Pod priority.

@@ -40,6 +40,9 @@ var ErrUnitFrozen = errors.New("调度单元已冻结，不能追加成员")
 type Unit interface {
 	Key() UnitKey
 	Mode() SubmitMode
+	Definition() *group.Definition
+	// SetDefinition 只在组装中保存声明副本；冻结后不能换用另一份配置。
+	SetDefinition(*group.Definition) error
 	Members() []PodRef
 	State() UnitState
 	Frozen() bool
@@ -59,16 +62,18 @@ type Unit interface {
 
 // schedulingUnit 是默认实现，同一个对象贯穿组装、冻结及后续处理。
 type schedulingUnit struct {
-	mu      sync.RWMutex
-	key     UnitKey
-	mode    SubmitMode
-	members []PodRef
-	state   UnitState
+	definition *group.Definition
+	mu         sync.RWMutex
+	key        UnitKey
+	mode       SubmitMode
+	members    []PodRef
+	state      UnitState
 }
 
 var _ Unit = (*schedulingUnit)(nil)
 
 // NewUnit 创建空的组装中单元；调用方负责提供本组内唯一的 ID。
+// 组装时还需 SetDefinition 保存本轮使用的组声明。
 func NewUnit(key UnitKey, mode SubmitMode) Unit {
 	return &schedulingUnit{key: key, mode: mode, state: UnitState{Phase: UnitNew, Queue: QueueNone}}
 }

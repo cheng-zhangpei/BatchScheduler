@@ -9,6 +9,17 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
+// SnapshotNodeInfos 导出 Filter/Score 使用的这一轮节点信息，不再读取 informer。
+// 原生 Snapshot 会复制资源统计、端口和成员列表，后续试放不会改掉过滤器的资源账。
+// 列表中的已有 Pod 和 Node 对象仍按原生约定共享，只读；要修改对象本身时先 DeepCopy。
+func (f *PodFilter) SnapshotNodeInfos() map[string]fwk.NodeInfo {
+	nodes := make(map[string]fwk.NodeInfo, len(f.nodes))
+	for _, node := range f.nodes {
+		nodes[node.Node().Name] = node.Snapshot()
+	}
+	return nodes
+}
+
 // buildNodeInfos 把 Node 和已分配 Pod 放进原生 NodeInfo，由上游代码计算资源和端口占用。
 // 先复制输入，不让本轮视图跟着 informer 共享对象变化；不回写传入的 Pod/Node。
 func buildNodeInfos(nodes []*corev1.Node, pods []*corev1.Pod) ([]fwk.NodeInfo, error) {

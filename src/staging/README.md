@@ -1,6 +1,6 @@
 # Staging 源码导航
 
-先分清四个目录：
+先按职责看下面这些位置：
 
 | 位置 | 职责 | 从哪里开始读 |
 | --- | --- | --- |
@@ -8,6 +8,7 @@
 | `buffer/` | 保存执行记录，接收观察，执行决定，记录反馈和清理 | `doc.go`、`buffer.go` |
 | `evaluation/` | 按阶段决定下一步，只返回 Decision | `record.go` |
 | `error_engine/` | 把原生错误映射成内部错误，再按类型返回处理意见 | `observed_error.go`、`engine.go` |
+| `history/` | 用 BoltDB 保存和查询调度成功记录 | `bolt.go` |
 
 ## 跟着一个 Unit 看
 
@@ -17,7 +18,8 @@
 4. `evaluation/record.go`：一个 Unit 按预处理、完成、错误、正常执行四步产生决定。
 5. `buffer/apply.go`：按 Action 分发。具体调用分别在 select、transition、execute、handoff 文件里。
 6. `buffer/report.go`：执行器每有进展就更新记录；中间进展不结束 Pending。
-7. `buffer/handoff.go`、`buffer/release.go`：队列先处理旧关联，成功后 Buffer 删除旧记录。
+7. `buffer/archive.go`：调度成功先存 BoltDB；再由 handoff/release 处理队列关联并清理活跃记录。
+8. `buffer/group_context.go`：为下一轮查询同组其他活跃 Unit 和成功历史。
 
 ## 执行器在哪里
 
@@ -26,3 +28,5 @@ Apply 只提交一次 Run。`scheduler/executor/` 自己组织 Filter → Pod Sc
 
 目前已实现过滤和 Pod 基础评分。组评分、组选点、真实预留、绑定、有资源时的恢复和 Active 消费循环尚未实现。
 详细说明见 [Buffer 源码阅读说明](../../docs/buffer.md)。
+
+跨 Unit 查询和归档的完整说明见 [组上下文与成功记录](../../docs/group-context.md)。

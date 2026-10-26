@@ -39,8 +39,8 @@ func (b *Buffer) beginAction(d staging.Decision) (staging.Execution, staging.Han
 	if len(members) == 0 {
 		members = r.Unit.Members()
 	}
-	// 这里复制成员、计划和错误说明，外部修改参数不会直接改掉 Record 的这些字段。
+	// 这里复制声明、成员、计划和错误说明，外部修改参数不会直接改掉本轮记录。
 	request := staging.Execution{ActionID: id, Unit: *d.Unit, Operation: d.Operation,
-		Mode: r.Unit.Mode(), Members: members, Plan: copyPlan(r.Plan), Failure: copyFailure(d.Failure)}
+		Mode: r.Unit.Mode(), Definition: r.Unit.Definition(), Members: members, Plan: copyPlan(r.Plan), Failure: copyFailure(d.Failure)}
 	return request, staging.Handoff{ActionID: id, Unit: r.Unit, Decision: d}, nil
 }

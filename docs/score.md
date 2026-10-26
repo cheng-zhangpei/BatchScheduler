@@ -1,6 +1,6 @@
 # Pod Score：原生评分到组评分的交接
 
-这一步只做两件事：为每个 Pod 的候选节点打基础分，把列表和提交模式传给组规划。
+这一步为每个 Pod 的候选节点打基础分，再把本轮完整 Pod、NodeInfo、评分列表和提交模式交给组规划。
 组评分和组内选点仍是 TODO。
 
 ## 调用顺序
@@ -10,7 +10,7 @@ Buffer 从冻结 Unit 取 Mode，填进 Execution
   → Executor
   → steps.Filter：固定本轮成员、节点资源视图，返回各 Pod 的候选节点
   → steps.Score：逐个 Pod 调用 upstream.PodScore
-  → GroupScoreInput{Mode, PodScores}
+  → GroupScoreInput{Mode, Pods, NodeInfos, PodScores}
   → steps.PlanGroup：后续实现组评分和组选点
 ```
 
@@ -51,7 +51,14 @@ Atomic 和 Partial 的 Mode 都来自 Unit，不重新猜测当前 CR 的模式�
 [scheduler/score.go](../src/scheduler/score.go) 中的 `GroupScoreInput` 包含：
 
 - Mode：冻结 Unit 的提交模式。
+- Placement：冻结组声明中的通信关系及资源整合开关。
+- Pods：本轮完整成员对象，保留资源需求和约束；按本轮成员顺序排列。
+- NodeInfos：节点名 → Filter/Score 这一轮的节点信息，包含节点标签、容量和已有 Pod 占用。
 - PodScores：PodRef → NodeScore 列表。
+- Context：同组其他活跃 Unit，以及 BoltDB 中的成功记录。
+- BoundPeers：本轮缓存中同组已绑定、未删除且未终态的 Pod，提供当前绑定位置。
+
+Pods 使用独立副本。NodeInfos 从 Filter 保存的节点信息调用原生 Snapshot 导出，不重新读缓存。它的资源统计、端口和成员列表已复制，后续试放可在副本上操作。已有 Pod 和 Node 对象仍只读；需要修改对象本身时先 DeepCopy，不能直接改共享对象。
 
 每个 NodeScore 保留节点名、总分、各插件归一化后的分数。插件分数尚未乘权重；被 Skip 的插件不出现在明细中，贡献为零。
 列表按总分降序排列，同分按节点名排列；保留全部候选，不提前截断。
@@ -60,4 +67,8 @@ Atomic 和 Partial 的 Mode 都来自 Unit，不重新猜测当前 CR 的模式�
 后续组评分和试放需要补上这些考虑，不能各取最高分就当作完整计划。
 
 Pod Score 完成后报告 Scored，Pending 仍属于同一个 ActionID。
-目前 PlanGroup 报告“组评分和组选点未实现”，Executor 转为 Blocked；不提交预留或绑定。
+目前 PlanGroup 已能生成通信候选，集中评分与最终汇总仍未实现，Executor 在最终汇总处转为 Blocked；不提交预留或绑定。
+
+Context 的历史记录不代表成员仍在运行，也不重复计入 NodeInfo 的资源占用。说明见 [组上下文与成功记录](group-context.md)。
+
+通信语义设计见[通信语义方案](communication-semantics.md)，本轮实现和阅读顺序见[通信放置源码说明](communication-placement.md)。完整组规划仍未完成。

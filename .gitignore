@@ -3,3 +3,6 @@
 
 # Local IDE configuration.
 /.idea/
+
+# Local scheduling history.
+/.batchscheduler/

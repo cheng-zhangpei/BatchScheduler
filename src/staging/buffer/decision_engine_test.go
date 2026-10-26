@@ -11,7 +11,7 @@ import (
 )
 
 func TestCompletionDoesNotHideConfirmedFailure(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	u := queuedUnit(t, view, "unit", workqueue.AllTogether, 0, 1)
 	if err := b.Accept(context.Background(), u); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestCompletionDoesNotHideConfirmedFailure(t *testing.T) {
 }
 
 func TestApplyTransitionUsesQueueVersionAndRealTransition(t *testing.T) {
-	b, view := fixture(workqueue.AllTogether)
+	b, view := fixture(t, workqueue.AllTogether)
 	w := workqueue.New()
 	w.Views = b.views
 	w.Staging = b

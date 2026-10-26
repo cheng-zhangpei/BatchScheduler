@@ -20,7 +20,7 @@ import (
 )
 
 func TestObserveRefreshesFactsWithoutChangingOwnership(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	u := queuedUnit(t, view, "unit", workqueue.AllowPartial, 0)
 	if err := b.Accept(context.Background(), u); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestObserveRefreshesFactsWithoutChangingOwnership(t *testing.T) {
 }
 
 func TestObserveWithoutAcceptedUnitDoesNotAccumulateRecords(t *testing.T) {
-	b, view := fixture(workqueue.AllowPartial)
+	b, view := fixture(t, workqueue.AllowPartial)
 	if err := b.Observe(context.Background(), staging.Observation{Group: view.Members[0].Group}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestObserveWithoutAcceptedUnitDoesNotAccumulateRecords(t *testing.T) {
 }
 
 func TestInformerCallbackUpdatesBufferOnPodChangeAndDeletion(t *testing.T) {
-	_, view := fixture(workqueue.AllowPartial)
+	_, view := fixture(t, workqueue.AllowPartial)
 	view.Group.APIVersion = scheduling.GroupVersion.String()
 	view.Group.Kind = "PodGroup"
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(view.Group)
@@ -86,7 +86,7 @@ func TestInformerCallbackUpdatesBufferOnPodChangeAndDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := NewBuffer(i.GroupViews)
+	b := NewBuffer(i.GroupViews, testHistory(t))
 	u := queuedUnit(t, view, "unit", workqueue.AllowPartial, 0)
 	ref := u.Members()[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -1,0 +1,30 @@
+apiVersion: scheduling.batchscheduler.io/v1alpha1
+kind: PodGroup
+metadata:
+  name: training-workers
+  namespace: default
+spec:
+  members: 3
+  submitMode: AllTogether
+  placement:
+    # 给候选组方案额外增加资源整合评价，不代表碎片永远比通信重要。
+    resourceConsolidation: true
+    communication:
+      - name: worker-0-to-1
+        # 引用成员 Pod 的 scheduling.batchscheduler.io/member-id 标签值。
+        from: worker-0
+        to: worker-1
+        preferredLevel: Node
+        weight: 10
+        priority: 100
+      - name: worker-1-to-2
+        from: worker-1
+        to: worker-2
+        preferredLevel: Rack
+        weight: 10
+        # 两条关系冲突时，这条优先降级。
+        priority: 50
+
+# 本文件只声明 PodGroup，不创建成员 Pod。
+# Operator 需要为每个成员设置稳定 member-id 和指向此组的 controller ownerReference。
+# 本地已接声明透传和本轮成员通信规划；最终选点、Assume、Bind 尚未实现。
