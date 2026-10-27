@@ -1,8 +1,8 @@
 # 第一版组评分与放置方案
 
-更新日期：2026-10-26。
+更新日期：2026-10-27。
 
-**状态：通信放置主线及声明透传已形成待 review 的原型，完整组规划尚未完成。** 集中评分、最终汇总及真实资源操作仍待实现。当前链路按 YAML 顺序处理，优先级测试失败，具体问题见[通信放置源码说明](communication-placement.md)。
+**状态：通信放置主线、声明透传、首版计划选定及本地 Assume/Forget 已接通。** 当前沿用通信搜索的排序选第一套完整方案；集中评分、多语义最终取舍及真实绑定仍待实现。2026-10-27 接入 Priority 从高到低、同值按名称的搜索顺序，具体做法见[通信放置源码说明](communication-placement.md)。
 
 后续一次讨论一个接口或一个方法，由用户主导行为与取舍，再写实现；不一次补完整个规划器。
 
@@ -11,6 +11,8 @@
 第一版保留两项组评价：**通信评价、可选的资源整合评价**。
 
 先根据通信关系组织少量可行放置方案，再评价这些方案的通信效果和资源分布，结合已有 Pod 基础分选出最终计划。
+
+从搜索角度，通信语义主导部分方案的扩展和保留，集中语义在保留的完整候选上评分。搜索取舍与最终评分分开：生成时要保留不同放法，评分阶段才能比较通信与资源的取舍。当前按成员数量保留不同布局只是初步办法，不保证保留所有其他语义偏好的方案，也不保证全局最优。
 
 ```text
 Pod Filter：每个 Pod 有哪些可行节点
@@ -137,7 +139,7 @@ node3：完整空闲，剩余 8 CPU
 
 如果一套方案通信更好、资源分布也更好，且其他条件相同，应当优先选择它。如果通信和资源各有优劣，就按用户允许的偏好进行权衡，不称其中一套为无条件的“最优”。
 
-通信插件目前先用 Pod 基础分求和、通信权重乘实际靠近分来做原始评价，说明见[通信放置源码](communication-placement.md)。最终分数范围、各项归一化与加权、同分怎样决定，仍留到汇总实现时逐项确定。
+通信插件目前先用 Pod 基础分求和、通信权重乘实际靠近分来做原始评价，说明见[通信放置源码](communication-placement.md)。首版选定沿用搜索排序，直接选择第一套完整候选，不重新计算总分。多语义分数范围、归一化与加权、同分怎样决定，仍待逐项确定。
 
 解释结果时保留各项分数和降级明细，让我们能看到最终为什么选择这套方案。
 
@@ -156,17 +158,17 @@ node3：完整空闲，剩余 8 CPU
 
 [planner/plugins.go](../src/scheduler/planner/plugins.go) 先定义两个接口：`LinkPlacementPlugin.Place` 返回多套完整候选方案；`ConcentrationPlugin.Score` 只评价一套方案的资源分布，不修改放置位置。插件在启动前设置，不让 Buffer 协调这些内部环节。
 
-默认已接 communication 插件，用户可通过 Executor.SetPlanner 替换。通信插件返回候选后，最终汇总仍返回 `ErrHandlerUnavailable`，Executor 报告 Blocked，不会开始 Assume 或 Bind。自动优化暂时只有 TODO，没有新接口或后台线程。
+默认已接 communication 插件，用户可通过 Executor.SetPlanner 替换。Planner 选出唯一计划后，Executor 报告 Planned 并批量 Assume；当前 Bind 尚未实现，会先调用 Recover/Forget 结清本轮暂占，再报告 Blocked。启用额外评分时，多语义比较仍返回 `ErrHandlerUnavailable`。自动优化暂时只有 TODO，没有新接口或后台线程。
 
 Pod 基础分来自 [upstream/score.go](../src/scheduler/upstream/score.go)，基础评分说明见 [Pod Score](score.md)。这次不修改上游插件。
 
 GroupScoreInput 已补充完整 Pod、NodeInfo、冻结的 Placement 声明和跨 Unit 上下文，通信插件从这份输入读取本轮数据。字段定义与源码一并保存在当前 checkpoint 中。
 
-通信配置、冻结声明透传及本轮成员的通信规划已实现。跨 Unit 端点解析、资源整合评分及最终汇总都尚未实现，不能把通信候选生成当作整个调度器已经跑通。
+通信配置、冻结声明透传、本轮成员通信规划、首版计划选定和本地 Assume/Forget 已实现。跨 Unit 端点解析、资源整合评分、多语义汇总及真实 Bind 仍未完成，不能把本地资源闭环当作整个调度器已经跑通。
 
 ## 8. 下一小块从哪里开始
 
-下一小块先 review **Place → placeLink → trial.place** 的正常路径和累计资源，再由用户决定集中评分或后续算法调整。源码说明见[通信放置插件](communication-placement.md)，不自动扩展整个规划器。
+下一次先 review **steps.Assume → Cache.Assume → Recover/Forget** 的调用，再讨论 Bind。其他语义评分接口保留，不继续扩展评分公式。源码说明见[通信放置插件](communication-placement.md)。
 
 先把一个问题讲清楚：前一步交给后一步什么，后一步返回什么。确认后再逐个实现链路候选、reduce、方案评价和汇总，不一次展开所有算法。
 

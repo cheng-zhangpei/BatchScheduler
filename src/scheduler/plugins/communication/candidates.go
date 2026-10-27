@@ -10,6 +10,7 @@ import (
 //
 // 做法是：先按当前评价排序，去掉完全相同的放置，再各取一种分布形状，
 // 还有空位就按原排名补齐。最后将保留结果重新排序，交给下一条链路或剩余成员。
+// 从搜索树看，这是每层扩展后的剪枝；保留不同形状，是给后续集中评分留出选择。
 // 这里选择的是继续搜索的备选，最终组选点仍由 Planner 后面的汇总步骤完成。
 func keepTrials(candidates []*trial, limit int) []*trial {
 	sort.SliceStable(candidates, func(i, j int) bool { return betterTrial(candidates[i], candidates[j]) })
@@ -47,7 +48,8 @@ func keepTrials(candidates []*trial, limit int) []*trial {
 
 // betterTrial 先逐项比较降级记录；前面处理的关系先比较，少降级的排在前面。
 // 全部降级步数一致时，再比较加权通信分，最后比较 Pod 基础分。
-// 因此它使用的是链路实际处理顺序，是否按 Priority 处理取决于上游 resolveLinks。
+// resolveLinks 已按 Priority 排序，所以降级数组越靠前的关系越先受保护。
+// 这是搜索中的排序依据；keepTrials 仍会为不同布局留位置，不要求所有候选同样近。
 func betterTrial(a, b *trial) bool {
 	for i := range a.degradation {
 		if a.degradation[i] != b.degradation[i] {

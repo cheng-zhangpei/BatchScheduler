@@ -12,6 +12,7 @@ import (
 	"batchscheduler/src/group"
 	"batchscheduler/src/informer"
 	execution "batchscheduler/src/scheduler/executor"
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/staging/buffer"
 	"batchscheduler/src/staging/history"
@@ -56,6 +57,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	resources := resourcecache.New()
+	if err := observed.OnResourceChange(resources); err != nil {
+		return err
+	}
 	store, err := history.Open(*historyPath)
 	if err != nil {
 		return err
@@ -67,7 +72,7 @@ func run() error {
 	}()
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
-	executor := execution.NewExecutor(observed.GroupViews, observed.Nodes, observed.Pods)
+	executor := execution.NewExecutor(observed.GroupViews, resources)
 	center := buffer.NewBuffer(observed.GroupViews, store, newStagingHandlers(queues, observed.Nodes, executor))
 	executor.SetGroupContextReader(center)
 	executor.Report = center.Report
@@ -96,6 +101,8 @@ func run() error {
 		return err
 	case <-ready:
 	}
+	// ready 已包含资源记账回调的初始同步，之后才允许执行调度工作。
+	slog.Info("调度资源账初始同步完成", "nodes", len(resources.SnapshotNodeInfos()))
 	// 执行器只增加一个工作线程：自己推进整条执行线，通过 Report 回报 Buffer。
 	executionDone := make(chan error, 1)
 	go func() { executionDone <- executor.Run(ctx) }()

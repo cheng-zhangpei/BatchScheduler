@@ -8,6 +8,7 @@ import (
 
 // LinkPlacementPlugin 接收本轮成员、按分数排序的 NodeList、NodeInfo 和通信声明。
 // 实现负责组合出若干套完整 Pod → Node 方案，并带出基础分、通信分和逐条关系结果。
+// 候选按实现自身的偏好由好到差排列；未启用额外评分时，Planner 直接沿用这个顺序。
 // Planner 随后把这些方案交给集中插件和最终汇总；试放阶段只更新本地副本。
 type LinkPlacementPlugin interface {
 	Place(context.Context, scheduler.GroupScoreInput) ([]CandidatePlan, error)

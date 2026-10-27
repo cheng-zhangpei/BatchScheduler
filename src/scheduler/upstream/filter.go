@@ -31,7 +31,7 @@ var _ scheduler.PodFilter = (*PodFilter)(nil)
 
 // NewPodFilter 为一轮组过滤准备固定的节点视图。
 // pods 必须包含集群中所有已分配的 Pod，而不只是我们负责的组成员。
-// 本地 Assume 尚未实现；以后调用方还须合入未被 informer 确认的预留，且不能重复计数。
+// 该入口保留给独立适配测试；运行路径使用 NewPodFilterFromSnapshot 读取共享资源账。
 // 新一轮或组内试放改变资源后，需要用更新后的视图重新构建；本对象不会自行刷新。
 func NewPodFilter(ctx context.Context, nodes []*corev1.Node, pods []*corev1.Pod) (*PodFilter, error) {
 	if err := ctx.Err(); err != nil {

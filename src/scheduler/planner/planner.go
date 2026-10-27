@@ -47,12 +47,6 @@ func (p *Planner) Plan(ctx context.Context, input scheduler.GroupScoreInput) (ma
 	// 环节三：自动优化暂留位置。如果以后调整了候选位置，需要重新检查并重算评分。
 	// TODO：先明确它与资源整合开关的区别，再决定是否增加这个环节的接口和实现。
 
-	// 环节四：汇总各项评价，选择最终计划。尚未实现时不能随便拿第一套方案继续绑定。
-	return selectBest(plans)
-}
-
-// selectBest 将来负责汇总与选定；分数范围、权重和同分处理还没有确定。
-func selectBest(_ []CandidatePlan) (map[workqueue.PodRef]string, error) {
-	// TODO：确认候选方案完整可行，再汇总 Pod、通信和可选资源整合评价。
-	return nil, fmt.Errorf("%w: 组方案评分汇总和最终选择尚未实现", staging.ErrHandlerUnavailable)
+	// 环节四：首版沿用通信搜索的排序，选出第一套完整计划。
+	return selectBest(input, plans)
 }

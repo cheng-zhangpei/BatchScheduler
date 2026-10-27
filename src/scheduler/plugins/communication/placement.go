@@ -35,7 +35,7 @@ func New() *Plugin {
 //  3. 用 completeMember 补上未参与链路的成员，再取出完整 CandidatePlan。
 //
 // 每条链路都接着上一轮保留的 trials 继续放，所以资源是整套方案累计计算的。
-// 当前 resolveLinks 沿用 YAML 声明顺序，所以下面的链路循环也按这个顺序执行。
+// resolveLinks 将 Priority 高的关系排在前面，搜索按这个顺序逐层扩展。
 // 没有通信声明时，直接通过第三段完成本轮成员的普通放置。
 func (p *Plugin) Place(ctx context.Context, input scheduler.GroupScoreInput) ([]planner.CandidatePlan, error) {
 	if err := ctx.Err(); err != nil {

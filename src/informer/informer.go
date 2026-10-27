@@ -1,4 +1,4 @@
-// Package informer 负责观察 Kubernetes 对象，暂不承担调度或资源记账。
+// Package informer 观察 Kubernetes 对象，将变化交给资源缓存和组观察入口。
 package informer
 
 import (
@@ -18,15 +18,16 @@ import (
 // Informers 共享一个 factory，后续模块通过 lister 读取其缓存。
 // lister 返回的是共享对象，调用方不得直接修改。
 type Informers struct {
-	factory       informers.SharedInformerFactory
-	groupFactory  dynamicinformer.DynamicSharedInformerFactory
-	Nodes         corelisters.NodeLister
-	Pods          corelisters.PodLister
-	PodGroups     cache.GenericLister
-	GroupViews    *group.Store
-	podInformer   cache.SharedIndexInformer
-	groupInformer cache.SharedIndexInformer
-	synced        []cache.InformerSynced
+	factory        informers.SharedInformerFactory
+	groupFactory   dynamicinformer.DynamicSharedInformerFactory
+	Nodes          corelisters.NodeLister
+	Pods           corelisters.PodLister
+	PodGroups      cache.GenericLister
+	GroupViews     *group.Store
+	podInformer    cache.SharedIndexInformer
+	groupInformer  cache.SharedIndexInformer
+	synced         []cache.InformerSynced
+	resourceErrors chan error // 资源记账失败时停止运行，避免继续使用不完整的资源账。
 }
 
 func New(client kubernetes.Interface, groupClient dynamic.Interface) (*Informers, error) {
@@ -47,30 +48,43 @@ func New(client kubernetes.Interface, groupClient dynamic.Interface) (*Informers
 		return nil, err
 	}
 	return &Informers{
-		factory:       factory, // 这是用来统一的管理所有的informer的，如果每次我要一个个确认很麻烦
-		Nodes:         nodes.Lister(),
-		Pods:          pods.Lister(),
-		groupFactory:  groupFactory,
-		PodGroups:     podGroups.Lister(),
-		GroupViews:    views,
-		podInformer:   podInformer,
-		groupInformer: groupInformer,
+		factory:        factory, // 这是用来统一的管理所有的informer的，如果每次我要一个个确认很麻烦
+		Nodes:          nodes.Lister(),
+		Pods:           pods.Lister(),
+		groupFactory:   groupFactory,
+		PodGroups:      podGroups.Lister(),
+		GroupViews:     views,
+		podInformer:    podInformer,
+		groupInformer:  groupInformer,
+		resourceErrors: make(chan error, 1),
 		// hasSync是首次同步的标记，不是staleness的标记
 		synced: []cache.InformerSynced{nodeInformer.HasSynced, podInformer.HasSynced, groupInformer.HasSynced},
 	}, nil
 }
 
-// Run 在初始 List 同步后通知入口，再持续观察，直到 ctx 取消。
-// 这只是 informer 缓存就绪；未来新增事件处理器时，还需考虑其处理进度。
+// Run 等 informer 缓存和已注册的资源记账初始回调都完成，再通知入口启动调度。
 func (i *Informers) Run(ctx context.Context, ready chan<- struct{}) error {
+	ctx, stop := context.WithCancel(ctx)
 	i.factory.Start(ctx.Done())
 	i.groupFactory.Start(ctx.Done())
-	defer i.factory.Shutdown()
-	defer i.groupFactory.Shutdown()
+	defer func() {
+		stop()
+		i.groupFactory.Shutdown()
+		i.factory.Shutdown()
+	}()
 	if !cache.WaitForCacheSync(ctx.Done(), i.synced...) {
 		return fmt.Errorf("Pod/Node/PodGroup informer 初始缓存未完成同步: %w", ctx.Err())
 	}
+	select {
+	case err := <-i.resourceErrors:
+		return fmt.Errorf("初始化调度资源账: %w", err)
+	default:
+	}
 	close(ready)
-	<-ctx.Done()
-	return nil
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-i.resourceErrors:
+		return fmt.Errorf("更新调度资源账: %w", err)
+	}
 }

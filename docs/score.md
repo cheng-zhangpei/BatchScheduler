@@ -60,6 +60,8 @@ Atomic 和 Partial 的 Mode 都来自 Unit，不重新猜测当前 CR 的模式�
 
 Pods 使用独立副本。NodeInfos 从 Filter 保存的节点信息调用原生 Snapshot 导出，不重新读缓存。它的资源统计、端口和成员列表已复制，后续试放可在副本上操作。已有 Pod 和 Node 对象仍只读；需要修改对象本身时先 DeepCopy，不能直接改共享对象。
 
+2026-10-27：Filter 的起点已改为共享 ResourceCache 的本轮快照，不再从 Node/Pod lister 重建资源占用。缓存之后继续变化，也不会改动本轮 Score 的资源视图。BoundPeers 同样来自这一轮快照中的已确认绑定成员；暂占只计资源，不作为已经运行的同组成员。
+
 每个 NodeScore 保留节点名、总分、各插件归一化后的分数。插件分数尚未乘权重；被 Skip 的插件不出现在明细中，贡献为零。
 列表按总分降序排列，同分按节点名排列；保留全部候选，不提前截断。
 
@@ -67,7 +69,7 @@ Pods 使用独立副本。NodeInfos 从 Filter 保存的节点信息调用原生
 后续组评分和试放需要补上这些考虑，不能各取最高分就当作完整计划。
 
 Pod Score 完成后报告 Scored，Pending 仍属于同一个 ActionID。
-目前 PlanGroup 已能生成通信候选，集中评分与最终汇总仍未实现，Executor 在最终汇总处转为 Blocked；不提交预留或绑定。
+目前 PlanGroup 已能生成通信候选并按搜索排序选定第一套完整计划。Executor 报告 Planned 后会批量 Assume 并报告 Assumed；Bind 尚未实现，确认未提交绑定后由 Recover 调用 Forget，再报告 Blocked/Recovered。不提交真实绑定。集中评分及多语义最终取舍仍未实现。
 
 Context 的历史记录不代表成员仍在运行，也不重复计入 NodeInfo 的资源占用。说明见 [组上下文与成功记录](group-context.md)。
 

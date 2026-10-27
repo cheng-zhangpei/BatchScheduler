@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/scheduler/upstream"
 	"batchscheduler/src/workqueue"
@@ -172,6 +173,14 @@ func TestUpstreamSnapshotChecksExistingPodAntiAffinity(t *testing.T) {
 	other.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{TopologyKey: "zone"}}}}
 	if _, err := upstream.NewPodFilter(context.Background(), []*corev1.Node{filterNode("node-a")}, []*corev1.Pod{other}); err == nil {
 		t.Fatal("既有 Pod 的硬反亲和性不能被忽略")
+	}
+	resources := resourcecache.New()
+	resources.UpdateNode(filterNode("node-a"))
+	if err := resources.UpdatePod(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upstream.NewPodFilterFromSnapshot(context.Background(), resources.SnapshotNodeInfos()); err == nil {
+		t.Fatal("切换到共享资源快照后，不能绕过既有 Pod 的硬反亲和性检查")
 	}
 }
 

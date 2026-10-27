@@ -31,7 +31,7 @@ func (e *Executor) schedule(ctx context.Context, a *executionAttempt) error {
 	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseScored, "", false); err != nil {
 		return err
 	}
-	// Step 3：组评分、组内选点。只留入口，具体算法下一步讨论。
+	// Step 3：通信搜索生成候选，再选定本轮唯一的 Pod → Node 计划。
 	a.Plan, err = e.steps.PlanGroup(ctx, &a.Attempt, scored)
 	if err != nil {
 		return err
@@ -43,7 +43,6 @@ func (e *Executor) schedule(ctx context.Context, a *executionAttempt) error {
 	if err := e.steps.Assume(ctx, &a.Attempt); err != nil {
 		return err
 	}
-	a.Reserved = true
 	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseAssumed, "", false); err != nil {
 		return err
 	}

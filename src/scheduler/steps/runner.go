@@ -4,24 +4,23 @@ package steps
 import (
 	"batchscheduler/src/scheduler/planner"
 	"batchscheduler/src/scheduler/plugins/communication"
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/scheduler/upstream"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 // Runner 持有步骤需要的数据读取器。Executor 直接调用它的方法。
 type Runner struct {
-	Groups  staging.GroupContextReader // 启动前接入 Buffer，查询同组其他轮次。
-	Planner planner.Planner            // 默认接通信候选生成；集中评分和最终汇总待实现。
-	views   workqueue.GroupViewReader
-	nodes   corelisters.NodeLister
-	pods    corelisters.PodLister
+	Groups    staging.GroupContextReader // 启动前接入 Buffer，查询同组其他轮次。
+	Planner   planner.Planner            // 默认接通信搜索并按其排序选定计划；其他语义的最终取舍待实现。
+	views     workqueue.GroupViewReader
+	resources *resourcecache.Cache // 与 informer 写入、后续 Assume 使用的是同一份资源账。
 }
 
-func NewRunner(views workqueue.GroupViewReader, nodes corelisters.NodeLister, pods corelisters.PodLister) *Runner {
-	return &Runner{views: views, nodes: nodes, pods: pods, Planner: planner.Planner{Placement: communication.New()}}
+func NewRunner(views workqueue.GroupViewReader, resources *resourcecache.Cache) *Runner {
+	return &Runner{views: views, resources: resources, Planner: planner.Planner{Placement: communication.New()}}
 }
 
 // Attempt 是正在执行的这一轮，执行结束后不长期保存。

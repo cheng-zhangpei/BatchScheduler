@@ -6,6 +6,7 @@ import (
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler"
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/workqueue"
 )
 
@@ -50,6 +51,13 @@ func executionFailure(err error) *group.FailureInfo {
 	if errors.As(err, &known) {
 		failure := known.info
 		return &failure
+	}
+	// Assume 复核的是选定计划。资源与端口暂时不满足时等待相关调度条件变化，节点消失则等节点变化。
+	if errors.Is(err, resourcecache.ErrAssumeNoFit) {
+		return &group.FailureInfo{Reason: workqueue.ReasonUnschedulable, Message: err.Error()}
+	}
+	if errors.Is(err, resourcecache.ErrAssumeNodeMissing) {
+		return &group.FailureInfo{Reason: workqueue.ReasonNodeUnavailable, Message: err.Error()}
 	}
 	// 未确认是可重试错误时采用通用 SchedulingError，不凭错误字符串猜重试资格。
 	return &group.FailureInfo{Reason: workqueue.ReasonSchedulingError, Message: err.Error()}

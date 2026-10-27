@@ -7,10 +7,10 @@ import (
 	"sync"
 
 	"batchscheduler/src/scheduler/planner"
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
-	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 // Executor 自己组织整条执行线。外部只提供数据读取器和唯一的 Report 回报通道。
@@ -28,8 +28,8 @@ type executionKey struct {
 	ActionID string
 }
 
-func NewExecutor(views workqueue.GroupViewReader, nodes corelisters.NodeLister, pods corelisters.PodLister) *Executor {
-	return &Executor{steps: steps.NewRunner(views, nodes, pods), requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
+func NewExecutor(views workqueue.GroupViewReader, resources *resourcecache.Cache) *Executor {
+	return &Executor{steps: steps.NewRunner(views, resources), requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
 }
 
 // SetGroupContextReader 在启动前接入 Buffer，让组规划能查到同组其他轮次与成功历史。

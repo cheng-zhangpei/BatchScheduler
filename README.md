@@ -4,9 +4,9 @@ A group-oriented Kubernetes scheduler built in Go, with explicit scheduling unit
 
 BatchScheduler is being developed as a standalone scheduler inspired by the Kubernetes scheduling architecture. It explores how groups of related Pods can be admitted, tracked, and recovered together while supporting smaller scheduling units where partial progress is appropriate.
 
-**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. Native filtering, per-Pod scoring, and an experimental communication-aware candidate planner are connected. Final plan selection, resource reservation, and real binding/recovery remain under development; the runtime does not bind Pods.
+**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. Native filtering, per-Pod scoring, communication-aware plan selection, and local Assume/Forget are connected. The current execution path releases its reservation and reports a blocked state at the unimplemented Bind step; the runtime does not bind Pods.
 
-**Known issue in this checkpoint:** communication relationships currently follow declaration order rather than `priority`. `TestPlaceAccumulatesSharedEndpointAndDegradesLowerPriority` fails and is retained for the next algorithm review.
+Communication relationships guide a bounded search over candidate placements: higher `priority` relationships are processed first, with names breaking ties. Different layouts remain available for later scoring. Resource consolidation scoring and selection across multiple scoring objectives are still pending.
 
 ## Project Goals
 
@@ -97,6 +97,7 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 ### Implemented
 
 - Typed Pod and Node informers, a dynamic PodGroup informer, and initial cache synchronization.
+- A shared resource ledger populated by Node and bound-Pod events, with startup waiting for initial accounting callbacks to finish. Filter reads its snapshot, and Pod scoring and group placement reuse that cycle's view. Batch Assume and execution-scoped Forget are connected to the execution path.
 - UID-aware group membership and member indexes.
 - Scheduling-unit assembly, frozen membership, and lifecycle tracking.
 - Initial queue selection for whole-group and partial submission.
@@ -104,7 +105,7 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Per-Pod scoring backed by four native plugins, with sorted candidate lists and submission mode forwarded to group planning.
 - Active/FastRetry FIFO storage and keyed Fail/Retry storage.
 - Center acceptance, observation, staged evaluation, action dispatch, and execution feedback.
-- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results; execution stops before final plan selection, which remains pending.
+- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results. Execution reports its plan and reservation; the unimplemented Bind step causes local reservation cleanup followed by a blocked report, without business-failure retries.
 - PodGroup placement declarations, frozen configuration passed through scheduling units, and a prototype that builds a limited set of communication-aware placements using cumulative resource and port checks.
 - Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
 - Version-checked queue transitions with retry classification and event/backoff conditions.
@@ -116,8 +117,8 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 ### In Progress / Planned
 
 - Active/FastRetry consumption and reliable transfer into the Center.
-- Review of relationship processing order, search behavior, and group placement semantics; resource consolidation scoring and final plan selection.
-- A scheduling resource cache with Assume/Forget semantics.
+- Review of search behavior and group placement semantics; resource consolidation scoring and selection across multiple scoring objectives.
+- Recovery for submitted or uncertain bindings, and safe takeover of reservations from earlier executions.
 - Real binding and recovery executors.
 - Broader failure mapping, operation timeout reconciliation, and restart recovery.
 - Buffer capacity controls, fairness, compaction, and FastRetry admission.
@@ -164,7 +165,7 @@ The process also supports the standard `KUBECONFIG` environment variable and def
 
 At startup, it synchronizes the Pod, Node, and PodGroup caches, logs resource counts, and evaluates observed groups for initial admission. It continues processing observation and retry notifications until interrupted.
 
-**Running this prototype does not schedule or bind Pods.** The executor worker and Report callback are registered; execution can generate placement candidates after filtering and Pod scoring, but final selection, Assume, Bind and resource recovery remain unimplemented. There is no Active-queue consumer yet. Release and failed-attempt handoff are connected. The current runtime reads cluster resources and updates its own state. Successful scheduling snapshots are stored in a local BoltDB file (default `.batchscheduler/history.db`, configurable with `--history-db`). In-flight execution recovery and history retention policies remain pending.
+**Running this prototype does not bind Pods.** Execution can filter, score, select one plan, and reserve its resources locally. Bind is still a placeholder: the executor confirms that binding has not started, calls Forget, and reports a blocked state with the reservation settled. An Assume capacity/port conflict instead reports an internal scheduling failure and can return through Fail and Retry. There is no Active-queue consumer yet. Submitted-binding recovery, earlier-execution takeover, failed-Report reconciliation, and selection using additional scoring objectives remain pending. Successful scheduling snapshots are stored in a local BoltDB file (default `.batchscheduler/history.db`, configurable with `--history-db`). In-flight execution recovery and history retention policies remain pending.
 
 ### Build
 
@@ -184,6 +185,7 @@ src/
     executor/                Execution queue, step orchestration, and reporting
     planner/                 Candidate plans, plugin contracts, and planning flow
     plugins/                 Concrete group planning plugins
+    resourcecache/           Shared NodeInfo accounting and Pod assumptions
     steps/                   Filtering, placement, reservation, binding, and recovery
     upstream/                Native Kubernetes filter and score adapters
   staging/                   Shared messages and Center interface

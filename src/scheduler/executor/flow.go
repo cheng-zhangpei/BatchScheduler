@@ -37,8 +37,8 @@ func (e *Executor) runExecution(ctx context.Context, request staging.Execution) 
 		// 绑定请求已经发出但结果未确认，不能一边盲目撤销，一边又安排新的执行。
 		return e.report(ctx, a, staging.FeedbackUnknown, staging.PhaseBinding, err.Error(), false)
 	}
-	if errors.Is(err, staging.ErrHandlerUnavailable) && !a.Reserved {
-		return e.report(ctx, a, staging.FeedbackBlocked, a.phase, err.Error(), true)
+	if errors.Is(err, staging.ErrHandlerUnavailable) {
+		return e.blockUntilImplemented(ctx, a, err)
 	}
 	a.failure = executionFailure(err)
 	return e.recoverAttempt(ctx, a)

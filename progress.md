@@ -1,6 +1,87 @@
 # BatchScheduler 架构与进度
 
-更新日期：2026-10-26。以当前代码和本次讨论为准，不使用百分比估算完成度。
+更新日期：2026-10-27。以当前代码和本次讨论为准，不使用百分比估算完成度。
+
+### 2026-10-27 收工：Assume / Forget 已接入执行线
+
+- 已接 `steps.Assume`：用本轮成员与最终 Plan 组装 Assumption 批次，调用共享缓存，成功后立即标记 Reserved，再由 Executor Report Assumed。
+- 已接本轮未提交绑定时的 `steps.Recover → Cache.Forget`。绑定结果未知、已发出绑定或新的恢复请求接手旧执行时，不会用未经确认的身份清理资源，这些恢复路径仍待实现。
+- 当前正常测试路径：Filter → Pod Score → PlanGroup → Assume → Assumed → Bind 占位确认未开始 → Recover/Forget → Blocked/Recovered（已结清）。没有真实绑定，也不把待实现 Bind 当成业务失败重复入队。
+- Assume 资源/端口复核失败映射为内部 Unschedulable，节点消失映射为 NodeUnavailable。已验证错误经 Report → Evaluate → 回送 Fail，再通过 Apply/Transition 进入 Retry；不是所有错误都自动重试。
+- Report 调用失败仍保留资源责任，不当成明确绑定失败去 Forget；失败对账和接手旧执行的资源身份协议尚未实现。
+- 验证通过：全量 `go test ./src/... -count=1 -timeout=90s`；随后补充的两个回归用例也通过，分别验证 Assumed 报告失败不误退资源、新恢复请求不能清旧执行的暂占。未连接真实集群，未做性能压测。
+- 下次只需先 review 本轮接线，再讨论 Bind。Active/FastRetry 消费、真实绑定与绑定后恢复、其他语义评分和生产级清理仍待逐个实现。
+
+以下保留开发过程记录，当前状态以顶部收工记录为准。
+
+### 2026-10-27：按执行身份批量 Forget
+
+- 实现 `Cache.Forget(UnitKey, ActionID, []PodRef)`：按 UID 查询暂占，核对所属执行，使用保存的 Pod 和节点退账，再删除 pods、assumed 记录。
+- 使用节点副本先退账、再统一提交，归属不一致时整次不变；重复调用、重复成员不会重复退资源，已确认绑定的占用不会被撤销。
+- 验证通过：`go test ./src/scheduler/resourcecache ./src/scheduler/steps ./src/cmd/batchscheduler -count=1 -timeout=90s`。覆盖部分成员释放、资源和 HostPort 释放、旧快照不变、归属错误不误清理、确认绑定保留、节点删除后的遗留账清理，以及 Assume → Filter 拒绝 → Forget → Filter 恢复候选。
+- 仍只接通缓存方法。steps.Assume、Recover 的调用及错误分类尚未接入，执行线继续停在 Assume，没有提交真实绑定。下一步再接这两端。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：资源缓存的批量 Assume
+
+- 实现 `resourcecache.Cache.Assume([]Assumption)`，一批只接收同一 Unit、同一 ActionID。输入 Pod 已带目标 NodeName，缓存保存独立副本。
+- 在最新资源账的受影响节点副本上累计检查资源与 HostPort，全部通过后一起更新 nodes、pods、assumed；任何成员失败都不留下本次部分占用。同一执行的相同计划重复调用不重复计费，其他执行或改变旧计划会被拒绝。
+- 测试已改为真实调用 Cache.Assume，验证无 informer 绑定通知时下一轮 Filter 仍看见暂占；另覆盖旧快照不变、确认绑定不重复计费、失败不污染原账和两个批次不能重复消费资源。
+- 验证通过：`go test ./src/scheduler/resourcecache ./src/scheduler/steps ./src/informer ./src/cmd/batchscheduler -count=1 -timeout=90s`。未连接真实集群。
+- 只实现缓存方法，steps.Assume、Forget 和执行恢复仍待逐个接入，未启用执行线的资源暂占，也未实现绑定。下一小步先补 Forget，再接执行入口。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：Filter 改读共享资源账
+
+- main 将 informer 更新的同一份 ResourceCache 传给 Executor → Runner。Filter 从共享账取本轮快照，不再使用 Node/Pod lister 重建资源占用；成员与组声明仍由 GroupView 提供。
+- 增加原生 Filter 的 NodeInfo 快照入口，继续调用原来的六个插件，并保留既有 Pod 硬反亲和性的未支持检查。旧 Node/Pod 构造入口保留给独立适配测试。
+- 资源快照同时给出包含全部占用的 Nodes 和仅含真实绑定的 BoundPods。暂占消耗资源，但不能被当成已经运行的同组成员。Score 与组试放继续沿用 Filter 的固定快照。
+- 本轮没有实现 Assume 登记或 Forget；缓存支持的读取路径先接通，再逐个实现资源变更方法。主线仍停在 Assume。
+- 验证通过：`go test ./src/scheduler/... ./src/informer ./src/cmd/batchscheduler -count=1 -timeout=90s`。新增检查共享占用影响下一轮过滤、已开始轮次快照不变、资源释放恢复候选，以及暂占与真实绑定成员的区分；暂占记录由测试直接构造，不代表 Assume 已实现。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：首次 informer 同步建立资源账
+
+- main 在启动 informer 前注册资源记账。Node 事件维护容量和属性，已绑定 Pod 事件维护资源与端口；包含其他调度器和 namespace 的 Pod，未绑定 Pod 不计入节点占用。
+- 增加按 Pod UID 查询的已记账对象索引，用保存的旧对象撤销占用，再记入更新后的对象。支持 Pod 先到、Node 后到，不重复累计同一 Pod。
+- ready 同时等待 informer 缓存和资源记账处理器的初始 HasSynced；初始记账未完成或失败，不启动执行与评估线程。后续事件继续更新资源账。
+- 新增只读 NodeInfo 快照用于查看和验证；Filter 尚未改读这份共享账，Assume/Forget 及真实资源恢复仍未实现，本轮没有修改 Buffer 的状态职责。
+- 验证包含：初始回调阻塞时 ready 不开放、其他调度器已绑定 Pod 的占用、Pending 不占用、Node/Pod 先后顺序、重复通知、资源与端口更新、删除，以及快照不改变共享账。
+- 检查通过：`go test ./src/informer ./src/scheduler/resourcecache ./src/cmd/batchscheduler -count=1 -timeout=90s`；另单独验证初始化记账失败时不开放 ready，并能停止 informer。未连接真实集群。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：Assume 先定义资源缓存
+
+- 新增 `scheduler/resourcecache`，只定义 Cache、Assumption 和空缓存构造函数。
+- Cache 用节点名索引 NodeInfo 总账，用 Pod UID 索引暂占明细。Assumption 保存 Unit、ActionID 和带目标节点的 Pod 副本，供后续确认绑定和 Forget 使用。
+- 本轮未实现资源变更方法，也未接入 informer、Filter 或 Executor；运行路径仍停在 Assume。下一步逐个实现初始同步、快照、Assume 和 Forget。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：首版 selectBest 接回执行线
+
+- 只实现计划选定：沿用通信搜索排序，取第一套完整方案，核对本轮成员及节点存在性，再返回独立位置表。累计资源与端口检查仍由 Place 负责，不重复搜索。
+- 现有其他语义评分接口保留；多语义之间的比较规则还没定，存在额外集中分时仍返回待实现错误，不忽略分数、不擅自分配权重。
+- 执行线现在可从 Scored 推进到 Planned，经 Report 把计划交回 Buffer；随后停在尚未实现的 Assume。没有真实资源预占和绑定，Active 消费也仍待实现。
+- 验证通过：`go test ./src/scheduler/... ./src/cmd/batchscheduler -count=1 -timeout=90s`，含计划选定及独立副本、不完整方案拒绝、多语义待实现和真实执行线的 Planned → Blocked（Assume）反馈。
+- 下一个方法单独讨论 Assume；不顺带实现资源缓存、Bind 或新的语义评分。
+
+以下保留先前检查点，当前状态以顶部记录为准。
+
+### 2026-10-27：通信引导搜索，先接 Priority
+
+- 沿用现有框架：trial 保存部分方案，placeLink 扩展关系，keepTrials 按层裁剪；通信引导搜索，其他语义评价完整候选。
+- 本轮只改一个行为：resolveLinks 按 Priority 从高到低排序，同值按名称，不修改输入声明。现有降级比较因此先保护重要关系。
+- 保留不同布局及部分更远方案的做法不变，给后续集中评分留选择；这不保证保留所有有价值的候选。
+- 新增同优先级按名称保护关系、同时保留另一种妥协方案的检查；此前失败的优先级用例一并复查。
+- 验证通过：`go test ./src/scheduler/... ./src/cmd/batchscheduler -count=1 -timeout=90s`，覆盖通信搜索、原生适配、执行编排和现有入口集成；没有做真实集群测试。
+- 集中评分公式、最终偏重与选定、跨 Unit 端点和真实资源操作仍待逐步实现，本轮没有增加通用搜索框架。
+
+以下保留历史检查点，当前状态以顶部记录为准。
 
 ### 2026-10-26 晚：只补做法注释，原型待逐步 review
 
@@ -169,7 +250,7 @@ Group 是任务与结果汇总边界，Unit 是处理机会和一轮尝试的载
 | compaction | 讨论方向 | 已确定放在缓冲区侧讨论 | 合并资格、组边界、旧尝试确认结束、新 Unit 身份；不修改冻结单元 | 暂无实现 |
 | 调度主循环 | 未实现 | Active 具备 Pop 方法 | 统一消费、尝试创建、取消与并发边界 | 暂无实现 |
 | 实际调度周期 | 未实现 | informer 提供原始节点事实 | 资源快照、过滤 / 选择、组内联合资源计算、放置方案 | 暂无实现 |
-| 调度资源缓存与 Assume / Forget | 未实现 | 已区分其与 informer 缓存的职责 | 临时占用、确认转正、失败释放、幂等与超时确认 | 暂无实现 |
+| 调度资源缓存与 Assume / Forget | 本地执行闭环已接通 | informer 初始化与持续校正、本轮资源快照、批量暂占、确认转正、按执行身份撤销及步骤接入 | 已提交/未知绑定恢复、旧执行接手、Report 失败对账及超时确认 | `src/scheduler/resourcecache/`、`src/scheduler/steps/` |
 | binding cycle | 未实现 | 仅有 PodBinding / PodBindingUnknown 等状态定义 | 真实绑定请求、异步结果、部分成功及未知结果处理 | 暂无实现 |
 | 感知与组结果汇总 | 观察及评估部分实现 | Pod/Group 变化更新本轮观察；Atomic/Partial 恢复范围建议 | 原生错误映射、执行结果反馈、完整组进度及恢复闭环 | `src/staging/buffer/observe.go`、`evaluate.go` |
 | operator | 未实现 | 约定创建 PodGroup 和带组 ownerReference 的 Pod | 创建、重建、业务生命周期维护 | 暂无实现 |

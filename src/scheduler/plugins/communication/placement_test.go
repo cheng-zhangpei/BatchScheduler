@@ -142,6 +142,28 @@ func TestPlaceAccumulatesSharedEndpointAndDegradesLowerPriority(t *testing.T) {
 	}
 }
 
+func TestPlaceEqualPriorityUsesNameAndKeepsAlternative(t *testing.T) {
+	input := placementInput(t, 3, 2)
+	input.Placement = &scheduling.PlacementSpec{Communication: []scheduling.CommunicationLink{
+		relation("ac", "worker-0", "worker-2", 100), relation("ab", "worker-0", "worker-1", 100),
+	}}
+	plans, err := New().Place(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := podRef(input.Pods[0]), podRef(input.Pods[1]), podRef(input.Pods[2])
+	if len(plans) == 0 || plans[0].Placements[a] != plans[0].Placements[b] {
+		t.Fatal("同优先级应先保护名称靠前的 ab，不受声明顺序影响")
+	}
+	// 优先保护 ab 不等于禁止其他放法；后续评分仍应能看到让 ac 更近的候选。
+	for _, plan := range plans {
+		if plan.Placements[a] == plan.Placements[c] && plan.Placements[a] != plan.Placements[b] {
+			return
+		}
+	}
+	t.Fatal("没有保留 ac 同节点的另一种放法")
+}
+
 func TestPlaceFallsBackAcrossMissingRackAndConflictingPorts(t *testing.T) {
 	input := placementInput(t, 2, 2)
 	for _, pod := range input.Pods {

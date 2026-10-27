@@ -42,9 +42,8 @@ func buildNodeInfos(nodes []*corev1.Node, pods []*corev1.Pod) ([]fwk.NodeInfo, e
 		}
 		seen[string(pod.UID)] = true
 		if info := byName[pod.Spec.NodeName]; info != nil {
-			// 已运行 Pod 的硬反亲和性也会限制新 Pod，不能只检查新 Pod 自己的约束。
-			if a := pod.Spec.Affinity; a != nil && a.PodAntiAffinity != nil && len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
-				return nil, fmt.Errorf("尚未接入原生 InterPodAffinity，节点视图含硬反亲和性 Pod: %s/%s", pod.Namespace, pod.Name)
+			if err := checkExistingPodConstraints(pod); err != nil {
+				return nil, err
 			}
 			info.AddPod(pod.DeepCopy())
 		}
@@ -60,6 +59,15 @@ func buildNodeInfos(nodes []*corev1.Node, pods []*corev1.Pod) ([]fwk.NodeInfo, e
 		infos = append(infos, byName[name])
 	}
 	return infos, nil
+}
+
+// checkExistingPodConstraints 保留已有 Pod 对新成员的限制，两个构造入口都必须检查。
+// 当前未接入 InterPodAffinity，不能把这些 Pod 的硬反亲和性忽略掉。
+func checkExistingPodConstraints(pod *corev1.Pod) error {
+	if a := pod.Spec.Affinity; a != nil && a.PodAntiAffinity != nil && len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+		return fmt.Errorf("尚未接入原生 InterPodAffinity，节点视图含硬反亲和性 Pod: %s/%s", pod.Namespace, pod.Name)
+	}
+	return nil
 }
 
 // checkSupportedConstraints 防止把“尚未接入的硬约束”当成“没有约束”。
