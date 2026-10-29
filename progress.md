@@ -1,6 +1,39 @@
 # BatchScheduler 架构与进度
 
-更新日期：2026-10-27。以当前代码和本次讨论为准，不使用百分比估算完成度。
+更新日期：2026-10-29。以当前代码和本次讨论为准，不使用百分比估算完成度。
+
+### 2026-10-29：Active → Buffer 已接通，准备真实集群验证
+
+- 新增 `cmd/batchscheduler/active.go` 的 runActive：持续 Pop，再调用 Accept。Accept 自己通知评估，无需消费者直接触发 Observe 或 Execute。
+- main 在缓存同步后启动消费者；接收失败时 Unit 放回 Active，错误交给 main 退出，不立即重试过期 Unit。自动重组尚未实现，当前保留这一明确退出策略。
+- 退出时取消上下文并等待消费、评估、执行和 informer 结束，再关闭历史数据库。FastRetry 消费仍未启用。
+- 验证通过：`go test ./src/cmd/batchscheduler -count=1 -timeout=60s`；`go test -race ./src/cmd/batchscheduler -run TestActiveConsumer -count=1 -timeout=60s`。覆盖不手动 Pop/Accept 即自动执行 Bind、Accept 拒绝后放回队列、Pop 后取消不丢 Unit，以及空队列等待时正常退出。
+- 消费函数及接线已经过用户查看。下一步启动虚拟机集群，验证真实 Pod 的入队、选点、Assume、Binding、Informer 确认及清理；目前尚未进行真实集群测试。
+
+以下保留之前的开发记录，当前状态以顶部记录为准。
+
+### 2026-10-29：显式 Inflight 队列与真实 Bind API
+
+- 修正上一版“调度后直接开 goroutine”的结构：Run 串行完成 Assume 后，只调用 Inflight.Submit；独立 Inflight 保存待绑定任务，并用固定 worker 调用 runBinding → steps.Bind → Report。
+- 新增启动参数 `--max-inflight`、`--bind-workers`、`--bind-timeout`，分别控制总轮数、实际绑定并发和每轮 API 等待时间。容量在调度前取得，worker 完成后归还，参数在连接集群前校验。
+- steps.Bind 按冻结成员和 Plan，携带 Pod UID 调用 client-go Pod binding API，一轮内顺序提交。main 已传入真实客户端。
+- API 成功经 Report Bound 回 Buffer；观察到实际绑定后，可以 Release、归档、清理。已测试实际占用接替暂占时不重复累计资源。
+- 明确拒绝且没有成功成员时 Recover → Forget → Fail，临时绑定拒绝再由现有错误引擎生成带退避的 Retry 决策。未知结果或部分成功保留记录，不虚报整轮已回滚；其查询对账、Atomic 回滚和 Partial 分别交接仍待实现。
+- 新增测试覆盖真实 client-go HTTP Binding 请求、单 worker 排队、可配置上限、后台阻塞时后续调度和资源可见性，以及 Buffer 成功清理和错误回送。详细源码说明见 `docs/binding.md`。
+- 验证通过：全量 `go test ./src/... -count=1 -timeout=90s`；新增绑定、Inflight 和并发场景通过 `go test -race ./src/scheduler/executor ./src/scheduler/steps ./src/cmd/batchscheduler -run 'Test(Inflight|AsyncBinding|Bind|Binding|PartialBind)' -count=1 -timeout=90s`。
+- main 的 Active/FastRetry → Accept 消费循环仍未启用；未连接真实集群，不能把上述执行线验证当成完整系统部署验证。
+
+以下保留之前的开发记录，当前状态以顶部记录为准。
+
+### 2026-10-29：先拆出异步 Binding 骨架
+
+- 串行 `schedule` 运行到 Assume 和 Report Assumed；成功后交给后台 `runBinding`，串行线程可以继续下一轮调度。
+- 后台继续使用同一个 Attempt 和 Report。Buffer 无需新接口，也不负责启动或监控每个绑定步骤。
+- 同时进行的调度/绑定最多 4 轮，名额在调度前取得；后台结束后释放。同一次请求在后台期间保持去重标记，Run 退出时等待后台协程结束。
+- 本步没有实现真正的 API 绑定。Bind 仍返回未开始，后台沿原路径 Recover → Forget → Blocked；绑定结果未知时的对账仍待实现。
+- 测试通过：`go test ./src/scheduler/executor ./src/cmd/batchscheduler -count=1 -timeout=60s`，以及新增异步用例的 `go test -race ./src/scheduler/executor -run TestAsyncBinding -count=1 -timeout=60s`。验证后台暂停不阻塞下一轮、下一轮看得见暂占、请求去重、并发上限和退出等待；未连接集群。
+
+以下保留之前的开发记录，当前状态以顶部记录为准。
 
 ### 2026-10-27 收工：Assume / Forget 已接入执行线
 

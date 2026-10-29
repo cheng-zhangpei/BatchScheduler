@@ -4,7 +4,7 @@ A group-oriented Kubernetes scheduler built in Go, with explicit scheduling unit
 
 BatchScheduler is being developed as a standalone scheduler inspired by the Kubernetes scheduling architecture. It explores how groups of related Pods can be admitted, tracked, and recovered together while supporting smaller scheduling units where partial progress is appropriate.
 
-**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. Native filtering, per-Pod scoring, communication-aware plan selection, and local Assume/Forget are connected. The current execution path releases its reservation and reports a blocked state at the unimplemented Bind step; the runtime does not bind Pods.
+**Status: early development.** Resource observation, scheduling-unit queues, staged evaluation, and queue transitions are implemented. Active consumption connects to the Center, followed by native filtering, per-Pod scoring, communication-aware plan selection, local Assume/Forget, and Kubernetes binding requests. An explicit Inflight queue separates scheduling from binding workers. FastRetry consumption and recovery for partial or uncertain binding outcomes remain unfinished.
 
 Communication relationships guide a bounded search over candidate placements: higher `priority` relationships are processed first, with names breaking ties. Different layouts remain available for later scoring. Resource consolidation scoring and selection across multiple scoring objectives are still pending.
 
@@ -79,7 +79,9 @@ The implementation separates Kubernetes observations, scheduler decisions, and e
 | Decision engine | Evaluate completion, failures, and normal execution progress |
 | Error engine | Map supported Pod scheduling conditions to internal failures and dispatch error-specific handlers |
 | Apply | Route decisions to selection, queue transitions, execution, or handoff functions |
-| Executors | Perform placement, reservation, binding, and recovery; real implementations are pending |
+| Executor | Run placement and Assume serially, then hand prepared attempts to Inflight |
+| Inflight | Queue prepared attempts and run a configurable number of binding workers |
+| Execution steps | Implement filtering, scoring, placement, reservation, binding API calls, and supported recovery |
 
 The Center has two independent inputs:
 
@@ -105,7 +107,8 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Per-Pod scoring backed by four native plugins, with sorted candidate lists and submission mode forwarded to group planning.
 - Active/FastRetry FIFO storage and keyed Fail/Retry storage.
 - Center acceptance, observation, staged evaluation, action dispatch, and execution feedback.
-- Executor-owned execution queue and step orchestration, with one Report interface for progress and final results. Execution reports its plan and reservation; the unimplemented Bind step causes local reservation cleanup followed by a blocked report, without business-failure retries.
+- Executor-owned execution queue and step orchestration: placement and Assume run serially, then an explicit Inflight queue hands attempts to binding workers. Capacity, worker count, and binding timeout are configurable. Workers use client-go's Pod binding API and the existing Report interface.
+- Successful binding reports, informer confirmation, history archival, and release of completed attempts. Confirmed rejection before any member binds can recover through Forget and Fail/Retry. Uncertain or partially successful binding keeps the attempt pending for future reconciliation.
 - PodGroup placement declarations, frozen configuration passed through scheduling units, and a prototype that builds a limited set of communication-aware placements using cumulative resource and port checks.
 - Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
 - Version-checked queue transitions with retry classification and event/backoff conditions.
@@ -116,10 +119,10 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 
 ### In Progress / Planned
 
-- Active/FastRetry consumption and reliable transfer into the Center.
+- FastRetry consumption and admission rules.
 - Review of search behavior and group placement semantics; resource consolidation scoring and selection across multiple scoring objectives.
 - Recovery for submitted or uncertain bindings, and safe takeover of reservations from earlier executions.
-- Real binding and recovery executors.
+- Recovery and handoff after partially successful group binding.
 - Broader failure mapping, operation timeout reconciliation, and restart recovery.
 - Buffer capacity controls, fairness, compaction, and FastRetry admission.
 - A workload operator and validation against a live cluster.
@@ -134,6 +137,7 @@ The current tests establish behavior within their covered paths. They do not est
 - A reachable Kubernetes API server and a valid kubeconfig.
 - `kubectl` to install the PodGroup CRD.
 - Permissions to list and watch Pods, Nodes, and PodGroups across the namespaces observed by the process.
+- Permission to create the `pods/binding` subresource when using the execution path.
 
 Kubernetes Go dependencies are pinned to **v0.34.7** in [go.mod](go.mod). A supported cluster-version matrix has not yet been established.
 
@@ -163,9 +167,11 @@ go run ./src/cmd/batchscheduler --kubeconfig /path/to/kubeconfig
 
 The process also supports the standard `KUBECONFIG` environment variable and default kubeconfig discovery.
 
+Binding settings are `--max-inflight` (default `4`, total scheduling/waiting/binding attempts), `--bind-workers` (default `2`), and `--bind-timeout` (default `30s` per attempt). Values must be positive, and the worker count must not exceed the in-flight limit.
+
 At startup, it synchronizes the Pod, Node, and PodGroup caches, logs resource counts, and evaluates observed groups for initial admission. It continues processing observation and retry notifications until interrupted.
 
-**Running this prototype does not bind Pods.** Execution can filter, score, select one plan, and reserve its resources locally. Bind is still a placeholder: the executor confirms that binding has not started, calls Forget, and reports a blocked state with the reservation settled. An Assume capacity/port conflict instead reports an internal scheduling failure and can return through Fail and Retry. There is no Active-queue consumer yet. Submitted-binding recovery, earlier-execution takeover, failed-Report reconciliation, and selection using additional scoring objectives remain pending. Successful scheduling snapshots are stored in a local BoltDB file (default `.batchscheduler/history.db`, configurable with `--history-db`). In-flight execution recovery and history retention policies remain pending.
+**The main process drains Active into the Center after cache synchronization.** The execution path filters, scores, selects a plan, reserves resources, and submits real Pod binding requests through Inflight workers. An API success means node assignment, not container readiness; resource reservations remain accounted for until informer updates confirm actual bindings. Before any member binds, confirmed rejection can recover through Forget and Fail/Retry. Partial success and uncertain outcomes remain pending; they are not reported as successful rollback. FastRetry consumption, earlier-execution takeover, failed-Report reconciliation, and selection using additional scoring objectives remain pending. An Active-to-Center admission error currently returns the unit to Active and stops the process, rather than discarding it or retrying it indefinitely. Automatic reassembly of stale queued units is pending. Successful scheduling snapshots are stored in a local BoltDB file (default `.batchscheduler/history.db`, configurable with `--history-db`). In-flight execution recovery and history retention policies remain pending. See [binding design and source walkthrough](docs/binding.md). Live-cluster validation has not been performed.
 
 ### Build
 

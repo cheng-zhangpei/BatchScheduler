@@ -27,7 +27,23 @@ type executorTestViews struct{ view *group.View }
 func (v executorTestViews) Get(string, string) (*group.View, error) { return v.view, nil }
 
 // 使用和 main 相同的接线、真实执行器和原生过滤插件，只用本地缓存替代集群。
-func executorFixture(t *testing.T) (*buffer.Buffer, workqueue.Unit, *execution.Executor, *group.View, *resourcecache.Cache) {
+func executorFixture(t *testing.T, configs ...execution.Config) (*buffer.Buffer, workqueue.Unit, *execution.Executor, *group.View, *resourcecache.Cache) {
+	t.Helper()
+	b, w, executor, view, resources := queuedExecutorFixture(t, configs...)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	u, err := w.Active.Pop(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Accept(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	return b, u, executor, view, resources
+}
+
+// queuedExecutorFixture 保留入队后的任务，供测试真实 Active 消费循环，不手动 Pop/Accept。
+func queuedExecutorFixture(t *testing.T, configs ...execution.Config) (*buffer.Buffer, *workqueue.WorkQueue, *execution.Executor, *group.View, *resourcecache.Cache) {
 	t.Helper()
 	key := group.Key{Namespace: "work", Name: "job", UID: "group"}
 	controller := true
@@ -49,7 +65,11 @@ func executorFixture(t *testing.T) (*buffer.Buffer, workqueue.Unit, *execution.E
 	resources := resourcecache.New()
 	resources.UpdateNode(node)
 	nodeLister := corelisters.NewNodeLister(nodes)
-	executor := execution.NewExecutor(reader, resources)
+	executorConfig := execution.DefaultConfig()
+	if len(configs) != 0 {
+		executorConfig = configs[0]
+	}
+	executor := execution.NewExecutor(reader, resources, executorConfig)
 	w := workqueue.New()
 	w.Views = reader
 	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
@@ -72,16 +92,7 @@ func executorFixture(t *testing.T) (*buffer.Buffer, workqueue.Unit, *execution.E
 	if err := w.Select(workqueue.SelectRequest{View: view}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	u, err := w.Active.Pop(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Accept(ctx, u); err != nil {
-		t.Fatal(err)
-	}
-	return b, u, executor, view, resources
+	return b, w, executor, view, resources
 }
 
 func executionDecision(t *testing.T, b *buffer.Buffer, unit workqueue.Unit) staging.Decision {
@@ -103,7 +114,7 @@ func executionDecision(t *testing.T, b *buffer.Buffer, unit workqueue.Unit) stag
 	return staging.Decision{}
 }
 
-func TestBufferExecuteAssumesAndForgetsBeforeBlockingOnBind(t *testing.T) {
+func TestBufferExecuteAssumesAndForgetsWhenBindClientMissing(t *testing.T) {
 	b, unit, executor, view, resources := executorFixture(t)
 	type report struct {
 		feedback staging.Feedback

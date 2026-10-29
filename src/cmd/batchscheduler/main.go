@@ -37,7 +37,14 @@ func run() error {
 	loading := clientcmd.NewDefaultClientConfigLoadingRules()
 	flag.StringVar(&loading.ExplicitPath, "kubeconfig", "", "连接虚拟机集群的 kubeconfig 路径")
 	historyPath := flag.String("history-db", ".batchscheduler/history.db", "调度成功记录的本地 BoltDB 文件")
+	executionConfig := execution.DefaultConfig()
+	flag.IntVar(&executionConfig.MaxInFlight, "max-inflight", executionConfig.MaxInFlight, "调度及等待/正在绑定的最大轮数")
+	flag.IntVar(&executionConfig.BindWorkers, "bind-workers", executionConfig.BindWorkers, "后台绑定 worker 数量，不超过 max-inflight")
+	flag.DurationVar(&executionConfig.BindTimeout, "bind-timeout", executionConfig.BindTimeout, "一轮绑定的最长等待时间")
 	flag.Parse()
+	if err := executionConfig.Validate(); err != nil {
+		return err
+	}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loading, &clientcmd.ConfigOverrides{}).ClientConfig()
 	if err != nil {
 		return err
@@ -72,7 +79,8 @@ func run() error {
 	}()
 	queues := workqueue.New()
 	queues.Views = observed.GroupViews
-	executor := execution.NewExecutor(observed.GroupViews, resources)
+	executionConfig.Client = client
+	executor := execution.NewExecutor(observed.GroupViews, resources, executionConfig)
 	center := buffer.NewBuffer(observed.GroupViews, store, newStagingHandlers(queues, observed.Nodes, executor))
 	executor.SetGroupContextReader(center)
 	executor.Report = center.Report
@@ -81,7 +89,7 @@ func run() error {
 		return err
 	}
 	// informer 看见组/Pod 变化，就让 Observe 更新记录并通知评估。
-	// Active.Pop → Accept 是另一条路径，目前还没有启动它的消费循环。
+	// Active.Pop → Accept 是另一条路径，在缓存就绪后由独立消费循环启动。
 	if err := observed.OnGroupChange(func(key group.Key) {
 		if err := center.Observe(ctx, staging.Observation{Group: key}); err != nil && ctx.Err() == nil {
 			slog.Error("更新调度中心观察失败", "namespace", key.Namespace, "group", key.Name, "error", err)
@@ -91,19 +99,23 @@ func run() error {
 		return err
 	}
 	ready := make(chan struct{})
-	done := make(chan error, 1)
+	done := make(chan struct{})
+	var informerErr error
 	// 这里开一个go routine专门用来ListAndWatch
-	go func() { done <- observed.Run(ctx, ready) }()
+	go func() {
+		defer close(done)
+		informerErr = observed.Run(ctx, ready)
+	}()
 	slog.Info("正在同步 Pod/Node/PodGroup informer 缓存，按 Ctrl+C 退出")
 
 	select {
-	case err := <-done:
-		return err
+	case <-done:
+		return informerErr
 	case <-ready:
 	}
 	// ready 已包含资源记账回调的初始同步，之后才允许执行调度工作。
 	slog.Info("调度资源账初始同步完成", "nodes", len(resources.SnapshotNodeInfos()))
-	// 执行器只增加一个工作线程：自己推进整条执行线，通过 Report 回报 Buffer。
+	// 执行器内部串行调度、后台绑定，各轮都通过同一个 Report 回报 Buffer。
 	executionDone := make(chan error, 1)
 	go func() { executionDone <- executor.Run(ctx) }()
 	// 缓存就绪后才启动评估，避免把初始跨资源 List 顺序当作任务异常。
@@ -136,8 +148,16 @@ func run() error {
 			return errors.Join(failures...)
 		})
 	}()
+	activeDone := make(chan struct{})
+	var activeErr error
+	go func() {
+		defer close(activeDone)
+		activeErr = runActive(ctx, queues, center)
+	}()
 	defer func() {
 		stop()
+		// 先停接收，再等待评估和执行退出；所有后台任务结束后才关闭历史数据库。
+		<-activeDone
 		<-queueChecksDone
 		if err := <-evaluationDone; err != nil {
 			slog.Error("评估 worker 退出", "error", err)
@@ -145,25 +165,20 @@ func run() error {
 		if err := <-executionDone; err != nil {
 			slog.Error("执行 worker 退出", "error", err)
 		}
+		<-done
 	}()
 
 	// 从本地缓存读取，只用于验证观察链路；这不是调度器的资源快照。
 	nodes, err := observed.Nodes.List(labels.Everything())
 	if err != nil {
-		stop()
-		<-done
 		return err
 	}
 	pods, err := observed.Pods.List(labels.Everything())
 	if err != nil {
-		stop()
-		<-done
 		return err
 	}
 	groups, err := observed.PodGroups.List(labels.Everything())
 	if err != nil {
-		stop()
-		<-done
 		return err
 	}
 	slog.Info("informer 初始缓存已同步", "nodes", len(nodes), "pods", len(pods), "podGroups", len(groups))
@@ -187,5 +202,10 @@ func run() error {
 			slog.Error("组调度入口处理失败", "namespace", metadata.GetNamespace(), "name", metadata.GetName(), "error", err)
 		}
 	}
-	return <-done
+	select {
+	case <-done:
+		return informerErr
+	case <-activeDone:
+		return activeErr
+	}
 }

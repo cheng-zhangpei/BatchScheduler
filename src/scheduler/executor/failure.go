@@ -7,6 +7,7 @@ import (
 	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler"
 	"batchscheduler/src/scheduler/resourcecache"
+	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/workqueue"
 )
 
@@ -47,6 +48,10 @@ func noCandidateFailure(members []workqueue.PodRef, results map[workqueue.PodRef
 }
 
 func executionFailure(err error) *group.FailureInfo {
+	var binding *steps.BindingError
+	if errors.As(err, &binding) {
+		return &group.FailureInfo{Reason: binding.Reason, Message: binding.Error()}
+	}
 	var known *schedulingFailure
 	if errors.As(err, &known) {
 		failure := known.info

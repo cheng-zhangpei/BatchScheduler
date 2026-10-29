@@ -16,6 +16,7 @@ import (
 // Executor 自己组织整条执行线。外部只提供数据读取器和唯一的 Report 回报通道。
 type Executor struct {
 	steps            *steps.Runner
+	config           Config
 	Report           func(context.Context, staging.Feedback) error
 	mu               sync.Mutex
 	requests         chan staging.Execution
@@ -28,8 +29,10 @@ type executionKey struct {
 	ActionID string
 }
 
-func NewExecutor(views workqueue.GroupViewReader, resources *resourcecache.Cache) *Executor {
-	return &Executor{steps: steps.NewRunner(views, resources), requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
+func NewExecutor(views workqueue.GroupViewReader, resources *resourcecache.Cache, config Config) *Executor {
+	runner := steps.NewRunner(views, resources)
+	runner.Client, runner.BindTimeout = config.Client, config.BindTimeout
+	return &Executor{steps: runner, config: config, requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
 }
 
 // SetGroupContextReader 在启动前接入 Buffer，让组规划能查到同组其他轮次与成功历史。
@@ -73,9 +76,11 @@ func (e *Executor) Execute(ctx context.Context, request staging.Execution) error
 	}
 }
 
-// Run 是唯一的执行工作线程，由 main 在 informer 就绪后启动。
-// Executor 内部调用步骤和 Report，不需要 Apply 再开一个监控线程。
+// Run 只组织串行调度，把已 Assume 的任务交给 Inflight；main 仍只需启动一次 Run。
 func (e *Executor) Run(ctx context.Context) error {
+	if err := e.config.Validate(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	if e.started {
 		e.mu.Unlock()
@@ -83,7 +88,15 @@ func (e *Executor) Run(ctx context.Context) error {
 	}
 	e.started = true
 	e.mu.Unlock()
-	defer func() { e.mu.Lock(); e.stopped = true; e.mu.Unlock() }()
+	inflight := newInflight(e.config)
+	inflight.start(ctx, e)
+	defer func() {
+		e.mu.Lock()
+		e.stopped = true
+		e.mu.Unlock()
+		// 停止接单后，等已启动的绑定协程退出，main 才能关闭 Buffer 使用的数据库。
+		inflight.closeAndWait()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -92,14 +105,28 @@ func (e *Executor) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			err := e.runExecution(ctx, request)
-			e.mu.Lock()
-			delete(e.accepted, executionKey{Unit: request.Unit, ActionID: request.ActionID})
-			e.mu.Unlock()
-			if err != nil && ctx.Err() == nil {
-				slog.Error("执行结果反馈失败，保留 Buffer 记录等待处理", "unit", request.Unit, "actionID", request.ActionID, "error", err)
+			if err := inflight.Reserve(ctx); err != nil {
+				return nil
 			}
+			a, err := e.prepareExecution(ctx, request)
+			if a == nil {
+				e.completeRequest(ctx, request, err)
+				inflight.Release()
+				continue
+			}
+			inflight.Submit(a)
 		}
+	}
+}
+
+// completeRequest 在调度失败或后台绑定结束后，移除这次请求的接收标记。
+// 绑定还在运行时保留标记，同一请求再次提交不会重复启动。
+func (e *Executor) completeRequest(ctx context.Context, request staging.Execution, err error) {
+	e.mu.Lock()
+	delete(e.accepted, executionKey{Unit: request.Unit, ActionID: request.ActionID})
+	e.mu.Unlock()
+	if err != nil && ctx.Err() == nil {
+		slog.Error("执行结果反馈失败，保留 Buffer 记录等待处理", "unit", request.Unit, "actionID", request.ActionID, "error", err)
 	}
 }
 

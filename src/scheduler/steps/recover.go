@@ -13,10 +13,16 @@ func (r *Runner) Recover(_ context.Context, a *Attempt) error {
 	if !a.Reserved && !a.Binding {
 		return nil
 	}
-	// 本轮没有提交绑定或已明确未开始绑定时，可以撤销本轮自己的暂占。
-	// 已发出的绑定、以及新的 Recover 请求接手旧执行，都还需要单独确认结果与原执行编号。
-	if a.Binding || a.Request.Operation != staging.OperationRun {
-		return fmt.Errorf("%w: 绑定结果或旧执行的暂占归属尚未确认，不能直接 Forget", staging.ErrHandlerUnavailable)
+	if a.Binding {
+		return ErrBindingResultUnknown
+	}
+	// 已有成员真正绑定时，不能只退整轮暂占就宣称回滚完成。
+	// TODO：分别实现 Atomic 的已绑定成员恢复，以及 Partial 的成功/失败成员交接。
+	if len(a.BoundMembers) != 0 {
+		return fmt.Errorf("%w: 已有 %d 个成员绑定成功，部分绑定的恢复尚未实现", staging.ErrHandlerUnavailable, len(a.BoundMembers))
+	}
+	if a.Request.Operation != staging.OperationRun {
+		return fmt.Errorf("%w: 旧执行的暂占归属尚未确认，不能直接 Forget", staging.ErrHandlerUnavailable)
 	}
 	if r.resources == nil {
 		return fmt.Errorf("%w: 恢复暂占缺少共享资源账", staging.ErrHandlerUnavailable)

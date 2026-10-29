@@ -1,6 +1,6 @@
 # Filter 适配：先掌握怎么调用
 
-当前 Execute 已接到 Buffer，内部 schedule 的 Step 1 已经真实调用过滤器。Filter 从共享 ResourceCache 取得本轮快照，后面的 Pod Score 和通信规划沿用同一份资源视图。首版可选出唯一计划并批量 Assume；Bind 尚未实现，当前会先 Forget，再报告 Blocked。
+当前 Execute 已接到 Buffer，内部 schedule 的 Step 1 已经真实调用过滤器。Filter 从共享 ResourceCache 取得本轮快照，后面的 Pod Score 和通信规划沿用同一份资源视图。首版可选出唯一计划并批量 Assume，再提交到 Inflight 队列，由 worker 调用真实 Bind API。
 
 ## 输入和输出
 
@@ -66,26 +66,30 @@ Assume 返回的资源/端口不满足由执行器映射为内部 Unschedulable�
 | `src/scheduler/steps/` | Filter、Pod Score、组选点、Assume、Bind、Recover 的具体实现 |
 | `src/scheduler/upstream/` | 原生插件的输入准备和调用适配 |
 
-从 `executor/schedule.go` 看整条执行线即可，不必先读插件内部：
+先看 `executor/schedule.go` 的串行调度，再看 `executor/inflight.go` 的任务交接和 worker，不必先读插件内部：
 
 ```text
 Buffer.Apply → Executor.Execute（接收进内部队列，快速返回）
-  Executor.Run 工作线程：
+  Executor.Run 串行调度（先取得一个执行名额）：
     Step 1：steps.Filter → GroupFilter → upstream.PodFilter → 原生插件
     Step 2：steps.Score → 原生 Pod 评分列表
     Step 3：steps.PlanGroup，通信搜索生成候选并选定唯一计划
     Step 4：steps.Assume → Cache.Assume，批量暂占 → Report Assumed
-    Step 5：steps.Bind，TODO
-    失败时：Executor 自己调用 steps.Recover
+    Assume 成功后，Inflight.Submit 入队，串行线程继续处理下一轮
+  Inflight worker 取出任务 → runBinding：
+    Step 5：Report Binding → steps.Bind → client-go Pod Bind → Report 结果
+    Bind 错误进入 Recover：能确认没有成员绑定时 Forget；未知或部分成功则保留记录
   每个进展和整轮结束 → 同一个 Buffer.Report
 ```
 
 Buffer 只提交一次 Run，同一轮始终使用同一个 ActionID。Progress 只更新记录并保留 Pending；Finished 且资源已结清才结束本轮等待。Buffer 不会再派发 Assume、Bind。执行器也不直接搬 workqueue。
 
-当前完整路径是 Filter → Score → PlanGroup → Assume → Report Assumed → Bind 占位返回“未开始”。Executor 确认绑定未提交后进入 Recover，Forget 撤销暂占，再报告 Blocked/Recovered 且资源已结清。Buffer 保留执行记录并停止等待开发，不把缺少 Bind 当成业务失败放进 Fail。
+`--max-inflight` 限制调度、队列等待和绑定中的总轮数，`--bind-workers` 决定实际并发绑定数。容量名额在 Filter 前取得，worker 结束后释放；名额用完时，新的任务在调度前等待。关闭 Run 时会等待 Inflight 中的任务及 worker 退出。同一请求的接收标记保留到后台结束，期间重复提交不会启动第二次。
+
+成功路径是 Filter → Score → PlanGroup → Assume → Inflight → Bind → Report Bound。Informer 随后提供真实绑定信息，Buffer 再产生 Release、保存成功历史并清理本轮。没有接入 Bind 客户端时仍会先 Forget，再报告 Blocked；main 已传入真实客户端。
 
 真实的过滤或 Assume 冲突则报告失败，完成本轮收尾后回 Fail。Report 调用失败不等于调度或绑定失败，现有路径保留暂占及 Buffer 记录，不擅自 Forget；后续对账仍待实现。
 
-尚未实现：多语义最终取舍、真实 Bind 及已提交绑定的恢复、旧执行接手和 Report 失败对账，以及 Active 消费循环。本次没有运行集群测试。
+Active 消费循环已在缓存同步后启动，自动完成 Pop → Accept。尚未实现：多语义最终取舍、部分绑定与未知结果的恢复、旧执行接手和 Report 失败对账，以及 FastRetry 消费。本次没有运行集群测试。绑定部分的完整源码说明见 [Binding 与 Inflight](binding.md)。
 
 Pod 评分的调用和输入输出见 [Pod Score](score.md)。

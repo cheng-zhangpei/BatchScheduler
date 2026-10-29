@@ -2,12 +2,11 @@ package executor
 
 import (
 	"context"
-	"errors"
 
 	"batchscheduler/src/staging"
 )
 
-// schedule 按步骤组织本轮调度，不要求外部拼接执行函数。
+// schedule 串行完成选点和暂占。返回成功后，Executor 再把这一轮交给后台绑定。
 func (e *Executor) schedule(ctx context.Context, a *executionAttempt) error {
 	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseFiltering, "", false); err != nil {
 		return err
@@ -46,17 +45,5 @@ func (e *Executor) schedule(ctx context.Context, a *executionAttempt) error {
 	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseAssumed, "", false); err != nil {
 		return err
 	}
-	// Step 5：绑定和结清本轮资源，直接继续，不等 Buffer 再派发 Bind。
-	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseBinding, "", false); err != nil {
-		return err
-	}
-	a.Binding = true
-	if err := e.steps.Bind(ctx, &a.Attempt); err != nil {
-		if errors.Is(err, staging.ErrExecutionNotStarted) {
-			a.Binding = false
-		}
-		return err
-	}
-	a.Binding, a.Reserved = false, false
 	return nil
 }

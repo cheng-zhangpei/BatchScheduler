@@ -16,7 +16,7 @@ import (
 )
 
 func TestRunStopsWhenBufferRejectsProgress(t *testing.T) {
-	e := NewExecutor(nil, nil)
+	e := NewExecutor(nil, nil, DefaultConfig())
 	want := errors.New("buffer rejected progress")
 	calls := 0
 	e.Report = func(_ context.Context, f staging.Feedback) error {
@@ -26,7 +26,7 @@ func TestRunStopsWhenBufferRejectsProgress(t *testing.T) {
 		}
 		return want
 	}
-	err := e.runExecution(context.Background(), staging.Execution{Operation: staging.OperationRun})
+	_, err := e.prepareExecution(context.Background(), staging.Execution{Operation: staging.OperationRun})
 	if !errors.Is(err, want) || calls != 1 {
 		t.Fatalf("汇报失败应直接停止，不应伪装成调度失败: calls=%d err=%v", calls, err)
 	}
@@ -48,7 +48,7 @@ func TestRunKeepsReservationWhenAssumedReportFails(t *testing.T) {
 	resources.UpdateNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
 		corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourcePods: resource.MustParse("32"),
 	}}})
-	e := NewExecutor(executionViews{view}, resources)
+	e := NewExecutor(executionViews{view}, resources, DefaultConfig())
 	want := errors.New("Assumed report rejected")
 	last := staging.ExecutionPhase("")
 	e.Report = func(_ context.Context, f staging.Feedback) error {
@@ -58,7 +58,7 @@ func TestRunKeepsReservationWhenAssumedReportFails(t *testing.T) {
 		}
 		return nil
 	}
-	err := e.runExecution(context.Background(), staging.Execution{Unit: workqueue.UnitKey{Group: key, ID: "unit"}, ActionID: "action",
+	_, err := e.prepareExecution(context.Background(), staging.Execution{Unit: workqueue.UnitKey{Group: key, ID: "unit"}, ActionID: "action",
 		Operation: staging.OperationRun, Mode: workqueue.AllTogether, Members: []workqueue.PodRef{{Name: pod.Name, UID: pod.UID}}})
 	if !errors.Is(err, want) || last != staging.PhaseAssumed || resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 1000 {
 		t.Fatalf("Report 失败被当成业务失败继续绑定或退账: last=%s, err=%v", last, err)

@@ -71,7 +71,7 @@ func TestRecoverKeepsReservationWhenBindingIsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Binding = true
-	if err := r.Recover(context.Background(), a); !errors.Is(err, staging.ErrHandlerUnavailable) {
+	if err := r.Recover(context.Background(), a); !errors.Is(err, ErrBindingResultUnknown) {
 		t.Fatalf("绑定结果尚未确认时不能直接退账: %v", err)
 	}
 	if !a.Reserved || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 4000 {
