@@ -53,8 +53,8 @@ func (h workQueueHandlers) selectGroup(_ context.Context, view *group.View) erro
 	return h.queues.Select(workqueue.SelectRequest{View: view, Nodes: nodes})
 }
 
-// handoff 处理旧 Unit 的结束通知：Release 只清旧记录，Return 还要通过 Select 接住下一轮。
-// 返回成功后，Buffer 才把旧 Unit 标 Done 并删除旧 Record。
+// handoff 把结束或回送请求交给 WorkQueue。
+// ReturnMembers 保留旧 Unit；只有 Return/Release 成功后，Buffer 才结束整个旧 Record。
 func (h workQueueHandlers) handoff(ctx context.Context, request staging.Handoff) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -62,14 +62,15 @@ func (h workQueueHandlers) handoff(ctx context.Context, request staging.Handoff)
 	switch request.Decision.Action {
 	case staging.ActionRelease:
 		return h.queues.ReleaseUnit(request.Unit.Key())
-	case staging.ActionReturn:
+	case staging.ActionReturn, staging.ActionReturnMembers:
 		if request.Decision.To != workqueue.QueueFail {
 			return fmt.Errorf("失败回送目前只支持进入 Fail")
 		}
-		// Evaluate 已确认恢复和资源收尾完成；Select 接住下一轮，Buffer 再删旧 Record。
+		// Return 结束旧轮次；ReturnMembers 只交回未放置成员，让旧轮次继续执行。
 		return h.queues.Select(workqueue.SelectRequest{Return: &workqueue.ReturnRequest{
 			Previous: request.Unit.Key(), Members: request.Decision.Members,
 			Failure: request.Decision.Failure, RecoveryComplete: true,
+			KeepPrevious: request.Decision.Action == staging.ActionReturnMembers,
 		}})
 	default:
 		return fmt.Errorf("未知 Handoff 动作: %s", request.Decision.Action)

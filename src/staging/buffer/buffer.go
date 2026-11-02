@@ -134,6 +134,9 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 			return fmt.Errorf("Atomic 组仍有未释放单元 %s，不能接收另一轮", otherKey.ID)
 		}
 		for ref := range other.Members {
+			if other.ReturnedMembers[ref] {
+				continue // 这个成员已交给新 Unit，可以接收它的新一轮。
+			}
 			// 同名新 Pod 先等旧 Pod 的这轮处理结束，避免旧结果影响新任务。
 			if names[ref.Name] {
 				return fmt.Errorf("成员名称 %s 仍由单元 %s 持有", ref.Name, otherKey.ID)

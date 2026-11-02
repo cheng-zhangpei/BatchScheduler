@@ -7,6 +7,7 @@ import (
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/staging"
+	"batchscheduler/src/workqueue"
 )
 
 // GroupContext 同时查询活跃 Unit 和已落盘的成功记录，供跨 Unit 的组规划使用。
@@ -23,8 +24,16 @@ func (b *Buffer) GroupContext(ctx context.Context, key group.Key) (staging.Group
 	b.mu.RLock()
 	for unitKey := range b.groups[key] {
 		r := b.records[unitKey]
+		// 已交出的成员由新轮次说明，旧轮次不再重复列出它们或它们的旧计划。
+		members := r.ActiveMembers()
+		plan := make(map[workqueue.PodRef]string)
+		for _, ref := range members {
+			if node := r.Plan[ref]; node != "" {
+				plan[ref] = node
+			}
+		}
 		result.InFlight = append(result.InFlight, staging.InFlightUnit{RecordID: r.ID, Unit: unitKey,
-			Mode: r.Unit.Mode(), Phase: r.ExecutionPhase, Members: r.Unit.Members(), Plan: copyPlan(r.Plan)})
+			Mode: r.Unit.Mode(), Phase: r.ExecutionPhase, Members: members, Plan: plan})
 	}
 	b.mu.RUnlock()
 	var err error

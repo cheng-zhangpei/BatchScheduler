@@ -10,17 +10,20 @@ import (
 // ReturnRequest 是 Buffer 明确交回的一轮失败任务，不是普通的 Pod 变化通知。
 // Previous 指向旧执行轮次；Members 指定下一轮成员，可以一次包含多个 Pod。
 // RecoveryComplete 必须由 Buffer 确认：恢复和资源收尾完成后，才允许重新排队。
+// KeepPrevious=true 时，确认范围只包括 Members，其他成员仍由旧轮次处理。
 type ReturnRequest struct {
 	Previous         UnitKey
 	Members          []PodRef
 	Failure          *group.FailureInfo
 	RecoveryComplete bool
+	KeepPrevious     bool // true：只交出指定成员，旧 Unit 继续处理其他成员；仅 Partial 使用。
 }
 
 // selectReturn 仍属于 Select：按已有失败决策组装新 Unit，首次放入 Fail。
 // 不再调用普通 Policy 猜测目标队列，也不把仍被 Buffer 持有的成员当作重复提交跳过。
-// 三步：检查旧轮次和回送成员 → 准备新 Unit → 替换队列记录并入队。
-// 成功后 Buffer 才删除旧 Record；这里不修改 Buffer，也不操作集群资源。
+// 三步：检查旧轮次和回送成员 → 准备新 Unit → 登记新归属并入队。
+// KeepPrevious 为 true 时保留旧 Unit，只交出指定成员；false 时结束旧的队列记录。
+// 这里不修改 Buffer，也不操作集群资源。
 func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 	if !request.RecoveryComplete || request.Failure == nil || request.Failure.Reason == "" || len(request.Members) == 0 {
 		return fmt.Errorf("失败回送需要成员、错误原因及恢复完成确认")
@@ -60,9 +63,11 @@ func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 		return err
 	}
 
-	// 到这里已经没有会返回错误的步骤。一次替换旧关联，并把新任务放进 Fail。
+	// 到这里已经没有会返回错误的步骤。登记新关联，并把新任务放进 Fail。
 	// 普通 Select 同时使用 selectMu，不能趁成员换轮次的间隙重复组装。
-	removeUnit(record, old)
+	if !request.KeepPrevious {
+		removeUnit(record, old)
+	}
 	record.units[next.Key().ID] = next
 	record.group.UnitIDs[next.Key().ID] = struct{}{}
 	for _, ref := range next.Members() {
@@ -90,11 +95,17 @@ func validateReturn(request ReturnRequest, old Unit, record *selectionState, vie
 	if mode != old.Mode() {
 		return fmt.Errorf("组提交模式已变化，不能按旧模式回送")
 	}
+	if request.KeepPrevious && mode != AllowPartial {
+		return fmt.Errorf("只有 Partial 可以交回部分成员并保留旧 Unit")
+	}
 
 	// 只允许回送旧 Unit 中的成员，不能顺带取走同组其他 Unit 正在处理的 Pod。
 	oldMembers := make(map[PodRef]bool)
 	for _, ref := range old.Members() {
-		oldMembers[ref] = true
+		// 冻结名单保留原成员；已交给下一轮的成员不再属于旧轮次的处理范围。
+		if state := record.pods[ref.UID]; state != nil && state.UnitID == old.Key().ID {
+			oldMembers[ref] = true
+		}
 	}
 	returned := make(map[PodRef]bool)
 	for _, ref := range request.Members {
@@ -107,12 +118,18 @@ func validateReturn(request ReturnRequest, old Unit, record *selectionState, vie
 		return fmt.Errorf("Atomic 必须回送整轮成员，不能只回送失败的几个 Pod")
 	}
 	observed := make(map[PodRef]*corev1.Pod)
+	if request.KeepPrevious && len(returned) == len(oldMembers) {
+		return fmt.Errorf("部分交接须给旧 Unit 留下继续执行的成员；整轮回送请结束旧 Unit")
+	}
 	for _, member := range view.Members {
 		if member.Group == key && member.Pod != nil {
 			observed[PodRef{Name: member.Pod.Name, UID: member.Pod.UID}] = member.Pod
 		}
 	}
 	for ref := range oldMembers {
+		if request.KeepPrevious && !returned[ref] {
+			continue // A、B 继续执行，本次只检查要交回的 C、D。
+		}
 		podState := record.pods[ref.UID]
 		if podState == nil || podState.UnitID != old.Key().ID {
 			return fmt.Errorf("旧 Unit 的成员关联已变化: %s", ref.Name)

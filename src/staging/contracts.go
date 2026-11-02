@@ -31,10 +31,10 @@ type Handlers struct {
 	Execute func(context.Context, Execution) error
 	// SelectGroup 调用 WorkQueue.Select，判断是否需要创建 Unit 并首次入队。
 	SelectGroup func(context.Context, *group.View) error
-	// Handoff 在旧 Unit 结束时处理队列里的旧关联，失败回送时还要接住下一轮任务。
+	// Handoff 处理整轮结束或部分成员回送。ReturnMembers 只接住指定成员，不结束旧 Unit。
 	// 返回 nil 才表示这些事已做完；普通 error 必须表示完全没做成，才能安全重试。
 	// 如果不知道做成没有，返回 ErrHandoffUnknown，等查清后再调用 ConfirmHandoff。
-	// Release 已接到 WorkQueue.ReleaseUnit；Return 已接到 WorkQueue.Select 的回送输入。
+	// Release 接到 WorkQueue.ReleaseUnit；Return/ReturnMembers 接到 Select，后者保留旧 Unit。
 	Handoff func(context.Context, Handoff) error
 }
 
@@ -50,7 +50,7 @@ type Execution struct {
 	Failure    *group.FailureInfo
 }
 
-// Handoff 是发给队列处理函数的结束通知：哪个旧 Unit，要回送还是只结束。
+// Handoff 是发给队列的交接请求：结束旧 Unit，或只把指定成员交给下一轮。
 // Partial 即使只重试部分成员，也要明确处理旧 Unit 其他成员的记录，不能直接丢掉。
 type Handoff struct {
 	ActionID string

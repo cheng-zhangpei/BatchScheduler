@@ -55,23 +55,9 @@ func (e *Executor) handleExecutionError(ctx context.Context, a *executionAttempt
 	return e.recoverAttempt(ctx, a)
 }
 
-// recoverAttempt 由执行器自己收尾，Buffer 不需要再为本次失败派发一次 Recover。
-func (e *Executor) recoverAttempt(ctx context.Context, a *executionAttempt) error {
-	if err := e.report(ctx, a, staging.FeedbackProgress, staging.PhaseRecovering, "", false); err != nil {
-		return err
-	}
-	if err := e.steps.Recover(ctx, &a.Attempt); err != nil {
-		kind := staging.FeedbackUnknown
-		if !errors.Is(err, steps.ErrBindingResultUnknown) && errors.Is(err, staging.ErrHandlerUnavailable) {
-			kind = staging.FeedbackBlocked
-		}
-		return e.report(ctx, a, kind, staging.PhaseRecovering, err.Error(), false)
-	}
-	a.Reserved, a.Binding = false, false
-	return e.report(ctx, a, staging.FeedbackFinished, staging.PhaseRecovered, "", true)
-}
-
 // report 是执行器唯一的回报出口；同一次请求始终使用同一个 ActionID。
+// main 将 e.Report 接到 Buffer.Report；下面这次调用就是反馈进入 Buffer 的位置。
+// Failure.Reason 带原始调度失败的分类；message 只解释当前情况，不作为错误分类。
 func (e *Executor) report(ctx context.Context, a *executionAttempt, kind staging.FeedbackKind, phase staging.ExecutionPhase, message string, settled bool) error {
 	a.phase = phase
 	failure := a.failure
@@ -80,7 +66,8 @@ func (e *Executor) report(ctx context.Context, a *executionAttempt, kind staging
 		failure = nil
 	}
 	err := e.Report(ctx, staging.Feedback{Unit: a.Request.Unit, ActionID: a.Request.ActionID, Operation: a.Request.Operation,
-		Kind: kind, Phase: phase, Message: message, Plan: a.Plan, Failure: failure, ResponsibilitiesSettled: settled})
+		Kind: kind, Phase: phase, Message: message, Plan: a.Plan, Failure: failure,
+		Resources: a.Resources.DeepCopy(), ResponsibilitiesSettled: settled})
 	if err != nil {
 		return &reportError{err}
 	}

@@ -31,11 +31,13 @@ func NewRunner(views workqueue.GroupViewReader, resources *resourcecache.Cache) 
 // Attempt 是正在执行的这一轮，执行结束后不长期保存。
 // 步骤一旦产生资源占用或发出绑定请求，就必须更新标记，供失败后的 Recover 判断。
 type Attempt struct {
-	Request      staging.Execution
-	Plan         map[workqueue.PodRef]string
-	Reserved     bool               // 仍有本地预留需要结清。
-	Binding      bool               // 已发出绑定，但还没有确认全部结果。
-	BoundMembers []workqueue.PodRef // 本轮已经得到 API 成功响应的成员，失败恢复时不能当成未绑定。
+	Request        staging.Execution
+	Plan           map[workqueue.PodRef]string
+	Reserved       bool                    // 仍有本地预留需要结清。
+	AssumedMembers []workqueue.PodRef      // 本次 Assume 已成功记账的成员，Recover 只撤销这份名单。
+	Resources      *staging.ResourceResult // 本次接纳结果，Executor 通过 Report 交给 Buffer；尚未由规划/Assume 填写。
+	Binding        bool                    // 已发出绑定，但还没有确认全部结果。
+	BoundMembers   []workqueue.PodRef      // 本轮已经得到 API 成功响应的成员，失败恢复时不能当成未绑定。
 
 	// Filter 保存本轮成员和节点视图，Score 直接复用，不再读取另一份缓存。
 	members    []*corev1.Pod

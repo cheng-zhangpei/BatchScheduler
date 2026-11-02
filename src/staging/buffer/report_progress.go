@@ -6,6 +6,7 @@ import (
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/staging"
+	"batchscheduler/src/workqueue"
 )
 
 // validateFeedback 检查报告的含义与顺序，不要求 Buffer 批准执行器的下一步。
@@ -74,7 +75,17 @@ func updateReportedProgress(r *staging.Record, f staging.Feedback) {
 	if f.Failure != nil {
 		r.Failure = copyFailure(f.Failure)
 	}
+	// Partial 的未放置成员没有参与本次绑定，不能跟随整轮进度变成 Reserved/Bound。
+	unplaced := make(map[workqueue.PodRef]bool)
+	if r.Resources != nil {
+		for _, member := range r.Resources.Unplaced {
+			unplaced[member.Pod] = true
+		}
+	}
 	for ref, state := range r.Members {
+		if unplaced[ref] {
+			continue
+		}
 		switch f.Phase {
 		case staging.PhaseAssumed:
 			state.Phase, state.PlannedNode = group.PodReserved, r.Plan[ref]

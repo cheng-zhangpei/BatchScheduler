@@ -9,6 +9,15 @@ import (
 // 外面的 Evaluate 对各 Unit 分别调用它，所以一批可以同时有人完成、有人失败、有人等待。
 func EvaluateRecord(key workqueue.UnitKey, record *staging.Record, invalidGroup bool) staging.Decision {
 	decision := staging.Decision{Group: key.Group, Unit: &key, Revision: record.Revision, Action: staging.ActionWait}
+	if record.ReturningMembers {
+		decision.Reason = "ReturningMembers"
+		return decision
+	}
+
+	// 未放置成员没有参与绑定，可以单独交回；其他成员即使仍在执行，也不用一起等待。
+	if partial, ok := evaluateUnplacedMembers(decision, record, invalidGroup); ok {
+		return partial
+	}
 
 	// 1. 先检查能不能继续判断：操作没做完就等，观察信息不足也先等。
 	if reason := evaluationWaitReason(record); reason != "" {

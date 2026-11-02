@@ -25,7 +25,8 @@ func (b *Buffer) archiveSuccess(ctx context.Context, d staging.Decision, actionI
 	}
 	record := staging.SuccessfulRecord{ID: r.ID, Unit: r.Unit.Key(), Mode: r.Unit.Mode(),
 		Generation: r.Generation, Revision: r.Revision, SavedAt: time.Now().UTC()}
-	for _, ref := range r.Unit.Members() {
+	// C、D 已交给新轮次时，只保存本轮实际完成的 A、B，不把等待任务归档为成功。
+	for _, ref := range r.ActiveMembers() {
 		observed := r.Observed.Members[ref]
 		observed.Status = *observed.Status.DeepCopy()
 		observed.Failure = copyFailure(observed.Failure)

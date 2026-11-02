@@ -54,25 +54,29 @@ const (
 // Feedback 是同一次执行的持续报告，ActionID 从开始到结束保持不变。
 // Kind 区分进展与结束；Phase 说明执行器已经做到哪里。这里仍按整个操作汇总，Pod 必须为 nil。
 type Feedback struct {
-	Unit                    workqueue.UnitKey
-	ActionID                string
-	Operation               Operation
-	Kind                    FeedbackKind
-	Phase                   ExecutionPhase
-	Message                 string
-	Pod                     *workqueue.PodRef
-	Failure                 *group.FailureInfo
-	Plan                    map[workqueue.PodRef]string // Planned 时提交完整成员 → 节点计划。
-	ResponsibilitiesSettled bool                        // Bind/Recover 已收尾：没有还在跑的请求，资源预占也已释放或转成正式占用。
+	Unit      workqueue.UnitKey
+	ActionID  string
+	Operation Operation
+	Kind      FeedbackKind
+	Phase     ExecutionPhase
+	Message   string
+	Pod       *workqueue.PodRef
+	Failure   *group.FailureInfo
+	Plan      map[workqueue.PodRef]string // Planned 时提交完整成员 → 节点计划。
+	// Resources 携带成员接纳结果；Report 保存到 Record，不在接收时回送队列。
+	// Progress 携带它时仍保留 Pending；当前规划/Assume 尚未生成这份结果。
+	Resources               *ResourceResult
+	ResponsibilitiesSettled bool // Bind/Recover 已收尾：没有还在跑的请求，资源预占也已释放或转成正式占用。
 }
 
 type Action string
 
 const (
-	ActionWait    Action = "Wait"    // 等待观察或执行反馈。
-	ActionExecute Action = "Execute" // 派发 Operation，等待反馈。
-	ActionReturn  Action = "Return"  // 经 Select 回送；必要时先组织下一轮 Unit。
-	ActionRelease Action = "Release" // 已满足释放条件，结束本轮记录。
+	ActionWait          Action = "Wait"          // 等待观察或执行反馈。
+	ActionExecute       Action = "Execute"       // 派发 Operation，等待反馈。
+	ActionReturn        Action = "Return"        // 经 Select 回送；必要时先组织下一轮 Unit。
+	ActionReturnMembers Action = "ReturnMembers" // 只交回指定成员，保留原 Record 和其他成员的执行。
+	ActionRelease       Action = "Release"       // 已满足释放条件，结束本轮记录。
 )
 
 // Decision 是 Evaluate 写给 Apply 的下一步安排，本身不表示已经执行。
@@ -95,13 +99,15 @@ type Decision struct {
 // 它由 Accept 创建，本轮结束后删除，不保存 Group 的完整历史。
 // PendingAction 为空只说明当前没在等某个操作，不代表已经完成所有收尾。
 type Record struct {
-	ID            string // 本轮 Record 的唯一编号，成功归档时沿用，避免重启后的 Unit 编号重复。
-	Unit          workqueue.Unit
-	Members       map[workqueue.PodRef]group.PodState
-	PendingAction string         // 正在等哪个操作，例如 action-3；空字符串表示没有。
-	Observed      *ObservedGroup // 最近一次从 informer 缓存读到的成员情况；nil 表示还没读过。
-	Revision      uint64         // 这份 Record 改过几次；旧 Decision 不能直接用在新版记录上。
-	Generation    int64          // Accept 时组声明的版本，用来发现之后的声明修改。
+	ID               string // 本轮 Record 的唯一编号，成功归档时沿用，避免重启后的 Unit 编号重复。
+	Unit             workqueue.Unit
+	Members          map[workqueue.PodRef]group.PodState
+	ReturnedMembers  map[workqueue.PodRef]bool // 已交给新 Unit 的成员；原 Unit 的冻结名单仍保留。
+	ReturningMembers bool                      // 正在同步交接部分成员；保留绑定 Pending，期间不结束整个 Record。
+	PendingAction    string                    // 正在等哪个操作，例如 action-3；空字符串表示没有。
+	Observed         *ObservedGroup            // 最近一次从 informer 缓存读到的成员情况；nil 表示还没读过。
+	Revision         uint64                    // 这份 Record 改过几次；旧 Decision 不能直接用在新版记录上。
+	Generation       int64                     // Accept 时组声明的版本，用来发现之后的声明修改。
 	// Failure 是执行器经 Report 确认的本轮失败，不从 Unit 的历史失败中照搬。
 	// informer 的匹配结果保存在 Observed.Members[ref].Failure，不会覆盖这里。
 	Failure                 *group.FailureInfo
@@ -110,6 +116,7 @@ type Record struct {
 	ExecutionPhase          ExecutionPhase              // 只记录执行进展，不再保存或派发 NextOperation。
 	ExecutionBlocked        bool                        // 代码停在待实现步骤；不能因评估通知重新执行整轮。
 	Plan                    map[workqueue.PodRef]string // 调度算法算出的 Pod → Node 计划。
+	Resources               *ResourceResult             // 本次接纳了谁、谁未放置；由 Report 保存，交出后由 ReturnedMembers 标记。
 	PendingOperation        Operation                   // 正在等待的整轮请求：Run 或 Recover。
 	PendingDecision         Action                      // 正在等待的动作类型，例如 Execute 或 Return。
 	LastFeedback            *Feedback                   // 只记住最近一次结果；相同结果再发来时不重复处理。

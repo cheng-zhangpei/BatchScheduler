@@ -16,7 +16,7 @@ func (b *Buffer) beginAction(d staging.Decision) (staging.Execution, staging.Han
 		return staging.Execution{}, staging.Handoff{}, fmt.Errorf("操作缺少 Unit")
 	}
 	r := b.records[*d.Unit]
-	if r == nil || r.Revision != d.Revision || r.PendingAction != "" {
+	if r == nil || r.Revision != d.Revision || r.PendingAction != "" || r.ReturningMembers {
 		return staging.Execution{}, staging.Handoff{}, staging.ErrStaleDecision
 	}
 	b.nextAction++

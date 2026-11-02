@@ -26,6 +26,7 @@ func (r *Runner) Assume(ctx context.Context, a *Attempt) error {
 	}
 	// 用 Filter 保存的完整成员和最终计划组装暂占记录，不修改原 Pod 对象。
 	batch := make([]resourcecache.Assumption, 0, len(a.members))
+	assumed := make([]workqueue.PodRef, 0, len(a.members))
 	for _, pod := range a.members {
 		ref := workqueue.PodRef{Name: pod.Name, UID: pod.UID}
 		if !expected[ref] || a.Plan[ref] == "" {
@@ -34,11 +35,14 @@ func (r *Runner) Assume(ctx context.Context, a *Attempt) error {
 		copy := pod.DeepCopy()
 		copy.Spec.NodeName = a.Plan[ref]
 		batch = append(batch, resourcecache.Assumption{Unit: a.Request.Unit, ActionID: a.Request.ActionID, Pod: copy})
+		assumed = append(assumed, ref)
 	}
 	if err := r.resources.Assume(batch); err != nil {
 		return err
 	}
-	// 批量登记成功才标记已暂占；后续 Report 失败也不能丢掉这份资源责任。
+	// 缓存确认整批记账成功后，才保存实际暂占名单。
+	// 计划里有位置不等于已经占到资源；失败时不能用计划冒充暂占结果。
+	a.AssumedMembers = assumed
 	a.Reserved = true
 	return nil
 }

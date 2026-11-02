@@ -23,6 +23,8 @@ func (b *Buffer) Apply(ctx context.Context, d staging.Decision) error {
 		return b.applyTransition(ctx, d)
 	case staging.ActionExecute:
 		return b.applyExecute(ctx, d)
+	case staging.ActionReturnMembers:
+		return b.applyReturnMembers(ctx, d)
 	case staging.ActionReturn, staging.ActionRelease:
 		return b.applyHandoff(ctx, d)
 	default:

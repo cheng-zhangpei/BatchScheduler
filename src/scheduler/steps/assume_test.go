@@ -39,7 +39,7 @@ func TestAssumeStepAndRecoverUseSameExecution(t *testing.T) {
 	if err := r.Assume(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
-	if !a.Reserved || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 4000 || a.members[0].Spec.NodeName != "" {
+	if !a.Reserved || len(a.AssumedMembers) != 2 || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 4000 || a.members[0].Spec.NodeName != "" {
 		t.Fatal("Assume 未写共享账、未保存资源责任，或改动了本轮原 Pod")
 	}
 	for range 2 {
@@ -47,7 +47,7 @@ func TestAssumeStepAndRecoverUseSameExecution(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if a.Reserved || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 {
+	if a.Reserved || len(a.AssumedMembers) != 0 || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 {
 		t.Fatal("Recover 没有用本轮执行身份退账，或重复恢复多退资源")
 	}
 }
@@ -62,6 +62,51 @@ func TestAssumeFailureDoesNotClaimReservation(t *testing.T) {
 	}
 	if a.Reserved || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 {
 		t.Fatal("批量 Assume 失败留下了部分占用或错误标记")
+	}
+	// 本批次没有提交占用，恢复不需要访问资源账，更不应该执行 Forget。
+	r.resources = nil
+	if err := r.Recover(context.Background(), a); err != nil {
+		t.Fatalf("Assume 失败且未记账时应直接完成恢复: %v", err)
+	}
+}
+
+func TestRecoverBeforeAssumeNeedsNoResourceCache(t *testing.T) {
+	for _, mode := range []workqueue.SubmitMode{workqueue.AllTogether, workqueue.AllowPartial} {
+		t.Run(string(mode), func(t *testing.T) {
+			_, a := assumeStepFixture()
+			a.Request.Mode = mode
+			// 已有计划，但没有执行 Assume；两种模式都不需要退账。
+			r := NewRunner(nil, nil)
+			if err := r.Recover(context.Background(), a); err != nil {
+				t.Fatalf("规划阶段失败不应要求 Forget: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoverOnlyForgetsRecordedMembers(t *testing.T) {
+	r, a := assumeStepFixture()
+	a.Request.Mode = workqueue.AllowPartial
+	// 模拟后续 Partial 执行的边界：原请求含 A、B，但本轮只有 A 暂占成功。
+	// B 的占用属于其他执行；恢复本轮时不能拿原请求的全部成员去退账。
+	for i, pod := range a.members {
+		copy := pod.DeepCopy()
+		copy.Spec.NodeName = "node-a"
+		owner, action := a.Request.Unit, a.Request.ActionID
+		if i == 1 {
+			owner.ID, action = "other-unit", "other-action"
+		}
+		if err := r.resources.Assume([]resourcecache.Assumption{{Unit: owner, ActionID: action, Pod: copy}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.Reserved = true
+	a.AssumedMembers = []workqueue.PodRef{a.Request.Members[0]}
+	if err := r.Recover(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Reserved || len(a.AssumedMembers) != 0 || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 2000 {
+		t.Fatal("恢复没有只撤销本轮暂占，或误动了其他执行的占用")
 	}
 }
 

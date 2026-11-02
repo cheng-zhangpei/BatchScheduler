@@ -24,7 +24,7 @@ type attemptFacts struct {
 // 这里只收集情况，后面的函数才决定怎么办。
 func summarizeAttempt(record *staging.Record, invalidGroup bool) attemptFacts {
 	facts := attemptFacts{
-		members: record.Unit.Members(), failure: record.Failure,
+		members: record.ActiveMembers(), failure: record.Failure,
 		invalidated: invalidGroup || !record.Observed.Exists || record.Observed.Deleting,
 		allBound:    true, allUnscheduled: true,
 	}
@@ -55,7 +55,8 @@ func summarizeAttempt(record *staging.Record, invalidGroup bool) attemptFacts {
 		}
 	}
 	// 看看是否已经有成员分到了节点，正常推进时不能再拿旧计划对它重复绑定。
-	for _, observed := range record.Observed.Members {
+	for _, ref := range facts.members {
+		observed := record.Observed.Members[ref]
 		facts.anyBound = facts.anyBound || observed.NodeName != ""
 	}
 	return facts
