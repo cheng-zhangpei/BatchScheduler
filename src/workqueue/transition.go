@@ -108,7 +108,7 @@ func (w *WorkQueue) Transition(request TransitionRequest) error {
 			return fmt.Errorf("成员归属或状态不允许重试，需先完成结果确认和清理")
 		}
 	}
-	plan, err := planRetry(failure.Reason, request.RetryAfter)
+	plan, err := PlanRetry(failure.Reason, request.RetryAfter)
 	if err != nil {
 		return err
 	}

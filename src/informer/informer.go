@@ -7,6 +7,7 @@ import (
 
 	scheduling "batchscheduler/src/apis/scheduling/v1alpha1"
 	"batchscheduler/src/group"
+	"batchscheduler/src/workqueue"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -27,7 +28,8 @@ type Informers struct {
 	podInformer    cache.SharedIndexInformer
 	groupInformer  cache.SharedIndexInformer
 	synced         []cache.InformerSynced
-	resourceErrors chan error // 资源记账失败时停止运行，避免继续使用不完整的资源账。
+	resourceErrors chan error                     // 资源记账失败时停止运行，避免继续使用不完整的资源账。
+	notifyRetry    func(workqueue.RetryCondition) // Run 前配置；已绑定 Pod 扣账后发出资源变化提示。
 }
 
 func New(client kubernetes.Interface, groupClient dynamic.Interface) (*Informers, error) {

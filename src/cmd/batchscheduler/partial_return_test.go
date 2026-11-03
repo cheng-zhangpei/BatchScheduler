@@ -97,15 +97,16 @@ func TestPartialReturnKeepsOriginalExecutionAndBatchesWaitingMembers(t *testing.
 		t.Fatal(err)
 	}
 	d := executionDecision(t, b, old)
-	if d.Action != staging.ActionReturnMembers || len(d.Members) != 2 {
-		t.Fatalf("C、D 应一起回送: %+v", d)
+	if d.Action != staging.ActionReturnMembers || d.To != workqueue.QueueRetry || len(d.Members) != 2 {
+		t.Fatalf("C、D 应一起回送 Retry: %+v", d)
 	}
 	if err := b.Apply(ctx, d); err != nil {
 		t.Fatal(err)
 	}
 	queued := w.GroupSnapshot(key)
-	if len(queued) != 1 || queued[0].State.Queue != workqueue.QueueFail || len(queued[0].Unit.Members()) != 2 || !queued[0].Failure.RecoveryComplete {
-		t.Fatalf("C、D 没有作为一批进入 Fail: %+v", queued)
+	if len(queued) != 1 || queued[0].State.Queue != workqueue.QueueRetry || len(queued[0].Unit.Members()) != 2 ||
+		queued[0].Retry.Plan.Condition != workqueue.RetryOnResources {
+		t.Fatalf("C、D 应直接进入 Retry 并等待资源变化: %+v", queued)
 	}
 	next := queued[0].Unit
 	for i, ref := range refs {
@@ -126,18 +127,23 @@ func TestPartialReturnKeepsOriginalExecutionAndBatchesWaitingMembers(t *testing.
 	if got := executionDecision(t, b, old); got.Action != staging.ActionWait {
 		t.Fatalf("A、B 应继续等待绑定，C、D 不能重复回送: %+v", got)
 	}
-	// 由真实错误引擎安排新轮次的 Fail → Retry → Active。
-	for _, wake := range []bool{false, true} {
-		if wake {
-			b.NotifyRetry(workqueue.RetryOnResources)
+	// 直接进入 Retry 也需要等待相关事件，不能在下一次评估中立即重新调度。
+	decisions, err := b.Evaluate(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.Action == staging.ActionTransition && decision.Unit != nil && *decision.Unit == next.Key() {
+			t.Fatal("资源没有变化时不应唤醒 C、D")
 		}
-		move := executionDecision(t, b, next)
-		if move.Action != staging.ActionTransition {
-			t.Fatalf("新轮次没有生成队列迁移决定: %+v", move)
-		}
-		if err := b.Apply(ctx, move); err != nil {
-			t.Fatal(err)
-		}
+	}
+	b.NotifyRetry(workqueue.RetryOnResources)
+	move := executionDecision(t, b, next)
+	if move.Action != staging.ActionTransition || move.Transition.To != workqueue.QueueActive {
+		t.Fatalf("资源变化后应重新进入 Active: %+v", move)
+	}
+	if err := b.Apply(ctx, move); err != nil {
+		t.Fatal(err)
 	}
 	ready, err := w.Active.Pop(ctx)
 	if err != nil || ready.Key() != next.Key() {

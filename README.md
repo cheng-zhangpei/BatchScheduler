@@ -113,9 +113,10 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Mapping of `PodScheduled=False` conditions for `Unschedulable`, `SchedulerError`, and `SchedulingGated` into internal failure types.
 - Version-checked queue transitions with retry classification and event/backoff conditions.
 - BoltDB-backed successful-attempt history and group context shared across units; current bound peers remain distinct from historical placement.
-- Release and failure-return handoff: completed attempts are removed, and failed members enter a new Fail-queue unit through Select before the Center drops the old record.
-- Retry notifications from node changes, bound-Pod deletion, scheduling-gate removal, and periodic queue checks.
+- Recovered attempts return through Fail. For Partial groups without communication links, members blocked by Filter or cumulative placement capacity can be returned as a separate Retry unit while the admitted members continue binding.
+- Retry notifications from node changes, bound-Pod deletion, scheduling-gate removal, and periodic queue checks. A bound-Pod deletion releases its cached resources before notifying waiting units.
 - Unit and fake-client integration tests for observation, decision generation, queue migration, and simulated execution.
+- A [container image](https://hub.docker.com/r/chengzhangpei/batchscheduler/tags) and [minikube deployment](config/deploy/minikube-demo.yaml), with binding permission scoped to the demo namespace.
 
 ### In Progress / Planned
 
@@ -125,9 +126,9 @@ Evaluation uses a separate queue of group keys. Repeated notifications for a gro
 - Recovery and handoff after partially successful group binding.
 - Broader failure mapping, operation timeout reconciliation, and restart recovery.
 - Buffer capacity controls, fairness, compaction, and FastRetry admission.
-- A workload operator and validation against a live cluster.
+- A workload operator for member creation and workload lifecycle, using PodGroup ownership to hand members to the scheduler.
 
-The current tests establish behavior within their covered paths. They do not establish production readiness, live-cluster scheduling correctness, or performance characteristics.
+On single-node minikube v1.34.0, the preview image was tested alongside the default scheduler. The demo verified that two Partial members can bind while a third waits, and that releasing capacity lets the waiting member bind. The deployment uses an `emptyDir` volume for scheduling history.
 
 ## Getting Started
 

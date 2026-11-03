@@ -9,8 +9,7 @@ import (
 	"batchscheduler/src/workqueue"
 )
 
-// Score 为本轮每个 Pod 生成评分列表，连同 Mode、完整 Pod、NodeInfo 交给后面的组规划。
-// 两种模式在这一步使用同样的原生评分；组评分如何解释 Mode，下一步再实现。
+// Score 为有候选节点的成员生成评分列表，连同 Mode、Pod 和 NodeInfo 交给组规划。
 func (r *Runner) Score(ctx context.Context, a *Attempt, candidates map[workqueue.PodRef]scheduler.PodFilterResult) (scheduler.GroupScoreInput, error) {
 	input := scheduler.GroupScoreInput{Mode: a.Request.Mode, PodScores: make(map[workqueue.PodRef][]scheduler.NodeScore)}
 	if a.Request.Definition != nil {
@@ -31,6 +30,9 @@ func (r *Runner) Score(ctx context.Context, a *Attempt, candidates map[workqueue
 		filtered, ok := candidates[ref]
 		if !ok {
 			return input, fmt.Errorf("成员 %s 缺少 Filter 结果", ref.Name)
+		}
+		if input.Mode == workqueue.AllowPartial && len(filtered.Candidates) == 0 {
+			continue // Executor 已把这个成员记入本轮的 Unplaced。
 		}
 		scores, err := scorer.Score(ctx, pod, filtered.Candidates)
 		if err != nil {

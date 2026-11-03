@@ -10,10 +10,89 @@ import (
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestGroupPlanRetriesAfterCapacityIsReleased(t *testing.T) {
+	config := execution.DefaultConfig()
+	client := fake.NewClientset()
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return action.GetSubresource() == "binding", nil, nil
+	})
+	config.Client = client
+	b, queues, executor, _, resources := queuedExecutorFixtureWithMembers(t, 2, config)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 节点有 4 核，已有 Pod 占 3 核。两个成员各需 1 核，单独通过 Filter，整组放不下。
+	occupier := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "occupier", UID: "occupier"},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3")},
+		}}}}}
+	if err := resources.UpdatePod(occupier); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan staging.Feedback, 1)
+	executor.Report = func(ctx context.Context, f staging.Feedback) error {
+		if err := b.Report(ctx, f); err != nil {
+			return err
+		}
+		if f.Kind == staging.FeedbackFinished {
+			finished <- f
+		}
+		return nil
+	}
+	startAttempt := func() workqueue.Unit {
+		t.Helper()
+		u, err := queues.Active.Pop(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Accept(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Apply(ctx, executionDecision(t, b, u)); err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	old := startAttempt()
+	failure := waitBindingFeedback(t, finished)
+	if failure.Phase != staging.PhaseRecovered || failure.Failure == nil || failure.Failure.Reason != workqueue.ReasonUnschedulable || len(client.Actions()) != 0 {
+		t.Fatalf("整组规划失败应可重试，且不提交绑定: %+v", failure)
+	}
+	if err := b.Apply(ctx, executionDecision(t, b, old)); err != nil {
+		t.Fatal(err)
+	}
+	queued := queues.GroupSnapshot(old.Key().Group)
+	if len(queued) != 1 || queued[0].State.Queue != workqueue.QueueFail || len(queued[0].Unit.Members()) != 2 {
+		t.Fatalf("应将整组成员一起回送 Fail: %+v", queued)
+	}
+	next := queued[0].Unit
+	if err := b.Apply(ctx, executionDecision(t, b, next)); err != nil {
+		t.Fatal(err)
+	}
+	if next.State().Queue != workqueue.QueueRetry {
+		t.Fatal("未找到组方案的失败应进入 Retry 等待资源变化")
+	}
+	if err := resources.RemovePod(occupier); err != nil {
+		t.Fatal(err)
+	}
+	b.NotifyRetry(workqueue.RetryOnResources)
+	if err := b.Apply(ctx, executionDecision(t, b, next)); err != nil {
+		t.Fatal(err)
+	}
+	if ready := startAttempt(); ready.Key() != next.Key() {
+		t.Fatalf("应从 Active 取到重新就绪的组单元: %+v", ready.Key())
+	}
+	if f := waitBindingFeedback(t, finished); f.Phase != staging.PhaseBound || len(client.Actions()) != 2 {
+		t.Fatalf("释放资源后应成功绑定两个成员: %+v", f)
+	}
+}
 
 // 走真实 Buffer → Executor → Inflight → steps.Bind → Report，再模拟 informer 确认后清理归档。
 func TestBindingSuccessClosesBufferAttemptAfterObservation(t *testing.T) {

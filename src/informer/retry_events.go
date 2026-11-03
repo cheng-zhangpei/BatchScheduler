@@ -8,7 +8,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// OnRetryChange 把节点容量/条件/放置属性变化与已绑定 Pod 释放提示送给评估入口。
+// OnRetryChange 在 Run 前接好重试通知。已绑定 Pod 的释放提示由资源记账回调发出。
 // 只表示条件可能改善，不保证能够调度；不在回调执行 Transition。
 // TODO：DependencyNotReady 对应的依赖资源 informer 尚未实现。
 func (i *Informers) OnRetryChange(notify func(workqueue.RetryCondition)) error {
@@ -40,11 +40,10 @@ func (i *Informers) OnRetryChange(notify func(workqueue.RetryCondition)) error {
 				notify(workqueue.RetryOnDependency)
 			}
 		},
-		DeleteFunc: func(obj interface{}) {
-			if pod, ok := deletedObject(obj).(*corev1.Pod); ok && pod.Spec.NodeName != "" {
-				notify(workqueue.RetryOnResources)
-			}
-		},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	i.notifyRetry = notify
+	return nil
 }

@@ -23,11 +23,11 @@ type NodeScore struct {
 }
 
 // GroupScoreInput 把本轮成员、节点信息和 Pod 评分一起交给后续组规划。
-// Mode 来自冻结的 Unit；这里只透传，Atomic/Partial 的组评分规则下一步再实现。
+// Mode 来自冻结的 Unit。Partial 只把通过 Filter 的成员送进组规划。
 type GroupScoreInput struct {
 	Mode       workqueue.SubmitMode
 	Placement  *scheduling.PlacementSpec        // 本轮冻结的通信关系和资源整合开关；nil 表示未声明偏好。
-	Pods       []*corev1.Pod                    // 本轮完整成员对象，与 PodScores 用名称和 UID 对应。
+	Pods       []*corev1.Pod                    // 进入组规划的成员，与 PodScores 用名称和 UID 对应。
 	NodeInfos  map[string]fwk.NodeInfo          // 节点名 → 本轮节点信息；资源统计是独立副本，可供后续试放。
 	PodScores  map[workqueue.PodRef][]NodeScore // 每个列表按总分从高到低排列，保留所有候选。
 	Context    staging.GroupContext             // 同组其他活跃 Unit，以及已归档成功记录。

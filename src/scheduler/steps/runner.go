@@ -35,7 +35,7 @@ type Attempt struct {
 	Plan           map[workqueue.PodRef]string
 	Reserved       bool                    // 仍有本地预留需要结清。
 	AssumedMembers []workqueue.PodRef      // 本次 Assume 已成功记账的成员，Recover 只撤销这份名单。
-	Resources      *staging.ResourceResult // 本次接纳结果，Executor 通过 Report 交给 Buffer；尚未由规划/Assume 填写。
+	Resources      *staging.ResourceResult // 部分暂占成功后的结果，由 Executor 通过 Report 交给 Buffer。
 	Binding        bool                    // 已发出绑定，但还没有确认全部结果。
 	BoundMembers   []workqueue.PodRef      // 本轮已经得到 API 成功响应的成员，失败恢复时不能当成未绑定。
 

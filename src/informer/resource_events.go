@@ -1,6 +1,8 @@
 package informer
 
 import (
+	"batchscheduler/src/workqueue"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -43,7 +45,14 @@ func (i *Informers) OnResourceChange(resources ResourceObserver) error {
 		UpdateFunc: func(_, current interface{}) { podChanged(current) },
 		DeleteFunc: func(obj interface{}) {
 			if pod, ok := deletedObject(obj).(*corev1.Pod); ok {
-				i.resourceError(resources.RemovePod(pod))
+				if err := resources.RemovePod(pod); err != nil {
+					i.resourceError(err)
+					return
+				}
+				// 先释放资源再唤醒，Retry 重新 Filter 时能看到这次扣账。
+				if pod.Spec.NodeName != "" && i.notifyRetry != nil {
+					i.notifyRetry(workqueue.RetryOnResources)
+				}
 			}
 		},
 	})

@@ -4,10 +4,13 @@ package communication
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	scheduling "batchscheduler/src/apis/scheduling/v1alpha1"
+	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler"
 	"batchscheduler/src/scheduler/planner"
+	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -24,7 +27,7 @@ func New() *Plugin {
 	return &Plugin{MaxPlans: 4, RackLabel: scheduling.GroupName + "/rack", ZoneLabel: corev1.LabelTopologyZone}
 }
 
-// Place 把本轮 Pod 的候选节点列表组合成若干套完整的 Pod → Node 方案。
+// Place 把本轮 Pod 的候选节点列表组合成若干套 Pod → Node 方案。
 //
 // 输入分为三部分：Pods 提供成员，PodScores 提供按基础分排好的节点列表，
 // NodeInfos 提供本轮节点容量和已有占用；Placement.Communication 提供用户的链路声明。
@@ -67,25 +70,39 @@ func (p *Plugin) Place(ctx context.Context, input scheduler.GroupScoreInput) ([]
 			return nil, err
 		}
 		if len(trials) == 0 {
-			return nil, fmt.Errorf("有限候选搜索未找到可行组方案，停止在链路 %s", l.Rule.Name)
+			return nil, fmt.Errorf("%w：无法放置链路 %s", planner.ErrNoFeasiblePlan, l.Rule.Name)
 		}
 	}
 
 	// 第三步：逐个确认全部成员都有位置。已经由链路放好的成员直接沿用，
 	// 其余成员沿自己的 NodeList 试放；没有链路声明时，所有成员都在这里安排。
+	allowPartial := input.Mode == workqueue.AllowPartial && len(rules) == 0
+	var unplaced []planner.UnplacedMember
 	for _, pod := range input.Pods {
-		trials, err = completeMember(ctx, input, trials, pod, limit)
+		nextTrials, err := completeMember(ctx, input, trials, pod, limit)
 		if err != nil {
 			return nil, err
 		}
-		if len(trials) == 0 {
-			return nil, fmt.Errorf("有限候选搜索无法放入剩余成员 %s", pod.Name)
+		if len(nextTrials) > 0 {
+			trials = nextTrials
+			continue
 		}
+		if !allowPartial {
+			return nil, fmt.Errorf("%w：无法放置成员 %s", planner.ErrNoFeasiblePlan, pod.Name)
+		}
+		// 保留已找到的方案，后续轮次再试放这个成员。
+		unplaced = append(unplaced, planner.UnplacedMember{Pod: podRef(pod), Failure: group.FailureInfo{
+			Reason: workqueue.ReasonUnschedulable, Message: fmt.Sprintf("本轮候选方案放不下成员 %s", pod.Name),
+		}})
+	}
+	if len(unplaced) == len(input.Pods) {
+		return nil, planner.ErrNoFeasiblePlan
 	}
 	plans := make([]planner.CandidatePlan, 0, len(trials))
 	// nodes 只是搜索过程的资源账。交给后续评分的是位置、分数和关系结果，
 	// 它们由每个 trial 的 plan 字段统一带出。
 	for _, t := range trials {
+		t.plan.Unplaced = slices.Clone(unplaced)
 		plans = append(plans, t.plan)
 	}
 	return plans, nil

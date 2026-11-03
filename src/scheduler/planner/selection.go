@@ -3,38 +3,50 @@ package planner
 import (
 	"fmt"
 	"maps"
+	"slices"
 
 	"batchscheduler/src/scheduler"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
 )
 
-// selectBest 沿用候选生成插件的排序，取第一套完整方案，不重新计算通信分。
-// 这里只核对成员齐全、节点存在；累计资源和端口检查由前面的 Place 负责。
-// 返回位置表的副本，Executor 后续保存或调整计划时不会改到插件留下的候选。
-func selectBest(input scheduler.GroupScoreInput, plans []CandidatePlan) (map[workqueue.PodRef]string, error) {
+// selectBest 沿用候选生成插件的排序，核对每个成员都有位置或明确的未放置原因。
+func selectBest(input scheduler.GroupScoreInput, plans []CandidatePlan) (PlanResult, error) {
 	if len(input.Pods) == 0 || len(plans) == 0 {
-		return nil, fmt.Errorf("无法选定计划：缺少本轮成员或候选方案")
+		return PlanResult{}, fmt.Errorf("无法选定计划：缺少本轮成员或候选方案")
 	}
 	// 额外评分的比较规则还没定，不能计算出了集中分却在选定时忽略它。
 	for _, plan := range plans {
 		if plan.Scores.Consolidation != nil {
-			return nil, fmt.Errorf("%w: 通信与资源整合评分的最终取舍尚未实现", staging.ErrHandlerUnavailable)
+			return PlanResult{}, fmt.Errorf("%w: 通信与资源整合评分的最终取舍尚未实现", staging.ErrHandlerUnavailable)
 		}
 	}
-	selected := plans[0].Placements
-	if len(selected) != len(input.Pods) {
-		return nil, fmt.Errorf("选中方案的成员数量与本轮不一致")
+	selected := plans[0]
+	if len(selected.Placements) == 0 || len(selected.Placements)+len(selected.Unplaced) != len(input.Pods) {
+		return PlanResult{}, fmt.Errorf("选中方案的成员数量与本轮不一致")
 	}
+	if len(selected.Unplaced) != 0 && input.Mode != workqueue.AllowPartial {
+		return PlanResult{}, fmt.Errorf("Atomic 需要所有成员都有目标节点")
+	}
+
+	expected := make(map[workqueue.PodRef]bool, len(input.Pods))
 	for _, pod := range input.Pods {
 		if pod == nil {
-			return nil, fmt.Errorf("选定计划的本轮成员中存在空 Pod")
+			return PlanResult{}, fmt.Errorf("选定计划的本轮成员中存在空 Pod")
 		}
-		ref := workqueue.PodRef{Name: pod.Name, UID: pod.UID}
-		node := selected[ref]
-		if node == "" || input.NodeInfos[node] == nil {
-			return nil, fmt.Errorf("选中方案的成员 %s 缺少位置或节点 %q 不在本轮快照中", pod.Name, node)
-		}
+		expected[workqueue.PodRef{Name: pod.Name, UID: pod.UID}] = true
 	}
-	return maps.Clone(selected), nil
+	for ref, node := range selected.Placements {
+		if !expected[ref] || node == "" || input.NodeInfos[node] == nil {
+			return PlanResult{}, fmt.Errorf("成员 %s 或目标节点 %q 不在本轮输入中", ref.Name, node)
+		}
+		delete(expected, ref)
+	}
+	for _, member := range selected.Unplaced {
+		if !expected[member.Pod] || member.Failure.Reason == "" {
+			return PlanResult{}, fmt.Errorf("未放置成员 %s 重复、不属于本轮或缺少原因", member.Pod.Name)
+		}
+		delete(expected, member.Pod)
+	}
+	return PlanResult{Placements: maps.Clone(selected.Placements), Unplaced: slices.Clone(selected.Unplaced)}, nil
 }

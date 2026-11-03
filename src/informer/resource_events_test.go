@@ -8,6 +8,7 @@ import (
 
 	scheduling "batchscheduler/src/apis/scheduling/v1alpha1"
 	"batchscheduler/src/scheduler/resourcecache"
+	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -128,5 +129,58 @@ func TestInvalidInitialResourcesDoNotOpenReady(t *testing.T) {
 	case <-ready:
 		t.Fatal("资源初始化失败仍然允许调度启动")
 	default:
+	}
+}
+
+func TestPodDeletionNotifiesRetryAfterReleasingResources(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bound", Namespace: "work", UID: "bound"},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+		}}}}}
+	client := fake.NewClientset(pod)
+	groups := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{scheduling.PodGroupGVR: "PodGroupList"})
+	observed, err := New(client, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := resourcecache.New()
+	// 只在资源账中登记节点，让本用例收到的资源通知只来自 Pod 删除。
+	resources.UpdateNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	if err := observed.OnResourceChange(resources); err != nil {
+		t.Fatal(err)
+	}
+	requestedAtWake := make(chan int64, 1)
+	if err := observed.OnRetryChange(func(condition workqueue.RetryCondition) {
+		if condition == workqueue.RetryOnResources {
+			requestedAtWake <- resources.SnapshotNodeInfos()["node-a"].GetRequested().GetMilliCPU()
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ready, done := make(chan struct{}), make(chan error, 1)
+	go func() { done <- observed.Run(ctx, ready) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		t.Fatal("资源账未完成初始同步")
+	}
+	if err := client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case requested := <-requestedAtWake:
+		if requested != 0 {
+			t.Fatalf("发出重试通知时仍有 %dm 的旧占用", requested)
+		}
+	case <-ctx.Done():
+		t.Fatal("已绑定 Pod 删除后没有发出资源变化通知")
 	}
 }

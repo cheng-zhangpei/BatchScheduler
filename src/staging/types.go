@@ -64,7 +64,7 @@ type Feedback struct {
 	Failure   *group.FailureInfo
 	Plan      map[workqueue.PodRef]string // Planned 时提交完整成员 → 节点计划。
 	// Resources 携带成员接纳结果；Report 保存到 Record，不在接收时回送队列。
-	// Progress 携带它时仍保留 Pending；当前规划/Assume 尚未生成这份结果。
+	// Progress 携带部分暂占结果时，保留已接纳成员的执行 Pending。
 	Resources               *ResourceResult
 	ResponsibilitiesSettled bool // Bind/Recover 已收尾：没有还在跑的请求，资源预占也已释放或转成正式占用。
 }

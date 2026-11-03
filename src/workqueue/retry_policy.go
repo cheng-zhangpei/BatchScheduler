@@ -65,7 +65,8 @@ type RetryPlan struct {
 	NotBefore time.Time
 }
 
-func planRetry(reason string, notBefore time.Time) (RetryPlan, error) {
+// PlanRetry 根据失败原因生成等待条件。传入零时间时，只接受等待集群变化的错误。
+func PlanRetry(reason string, notBefore time.Time) (RetryPlan, error) {
 	plan := RetryPlan{NotBefore: notBefore}
 	switch reason {
 	case ReasonUnschedulable:

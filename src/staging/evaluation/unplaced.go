@@ -1,6 +1,8 @@
 package evaluation
 
 import (
+	"time"
+
 	"batchscheduler/src/group"
 	"batchscheduler/src/staging"
 	errorengine "batchscheduler/src/staging/error_engine"
@@ -9,7 +11,7 @@ import (
 )
 
 // evaluateUnplacedMembers 只安排 Partial 的未放置成员，不结束整个 Unit。
-// 已暂占成员继续等待执行结果；未放置成员没有资源需要撤销，可以单独交回 Fail。
+// 已暂占成员继续执行；可等待集群变化的未放置成员直接回送 Retry。
 // 返回 false 只表示这里没有提出“部分回送”，外面的 EvaluateRecord 仍会继续判断等待、恢复等动作。
 func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup bool) (staging.Decision, bool) {
 	if invalidGroup || r.Unit.Mode() != workqueue.AllowPartial || r.Resources == nil ||
@@ -77,6 +79,9 @@ func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup
 
 	// 3. 交给 Apply 的是部分回送，不能套用会删除整个 Record 的 ActionReturn。
 	d.Action, d.To = staging.ActionReturnMembers, workqueue.QueueFail
+	if _, err := workqueue.PlanRetry(result.Reason, time.Time{}); err == nil {
+		d.To = workqueue.QueueRetry
+	}
 	d.Reason, d.Failure, d.Members = result.Reason, result.Failure, result.Members
 	return d, true
 }

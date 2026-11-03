@@ -2,6 +2,7 @@ package workqueue
 
 import (
 	"fmt"
+	"time"
 
 	"batchscheduler/src/group"
 	corev1 "k8s.io/api/core/v1"
@@ -16,10 +17,11 @@ type ReturnRequest struct {
 	Members          []PodRef
 	Failure          *group.FailureInfo
 	RecoveryComplete bool
-	KeepPrevious     bool // true：只交出指定成员，旧 Unit 继续处理其他成员；仅 Partial 使用。
+	KeepPrevious     bool      // true：只交出指定成员，旧 Unit 继续处理其他成员；仅 Partial 使用。
+	To               QueueName // 默认 Fail；已确认未放置的部分成员可直接进入 Retry。
 }
 
-// selectReturn 仍属于 Select：按已有失败决策组装新 Unit，首次放入 Fail。
+// selectReturn 按失败决策组装新 Unit，放入 Fail 或等待条件变化的 Retry。
 // 不再调用普通 Policy 猜测目标队列，也不把仍被 Buffer 持有的成员当作重复提交跳过。
 // 三步：检查旧轮次和回送成员 → 准备新 Unit → 登记新归属并入队。
 // KeepPrevious 为 true 时保留旧 Unit，只交出指定成员；false 时结束旧的队列记录。
@@ -27,6 +29,22 @@ type ReturnRequest struct {
 func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 	if !request.RecoveryComplete || request.Failure == nil || request.Failure.Reason == "" || len(request.Members) == 0 {
 		return fmt.Errorf("失败回送需要成员、错误原因及恢复完成确认")
+	}
+	decision := QueueDecision{To: QueueFail, Reason: request.Failure.Reason,
+		Message: request.Failure.Message, RecoveryComplete: true}
+	switch request.To {
+	case "", QueueFail:
+	case QueueRetry:
+		if !request.KeepPrevious {
+			return fmt.Errorf("只有部分成员回送可以直接进入 Retry")
+		}
+		plan, err := PlanRetry(decision.Reason, time.Time{})
+		if err != nil {
+			return err
+		}
+		decision.To, decision.RetryPlan, decision.WaitingFor = QueueRetry, plan, string(plan.Condition)
+	default:
+		return fmt.Errorf("未知回送目标队列 %q", request.To)
 	}
 	if w.Views == nil {
 		return fmt.Errorf("失败回送缺少组视图读取器")
@@ -57,8 +75,6 @@ func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 			return err
 		}
 	}
-	decision := QueueDecision{To: QueueFail, Reason: request.Failure.Reason,
-		Message: request.Failure.Message, RecoveryComplete: true}
 	if err := prepareEnqueue(next, decision); err != nil {
 		return err
 	}

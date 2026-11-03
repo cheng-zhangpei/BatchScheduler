@@ -1,0 +1,9 @@
+**
+!go.mod
+!go.sum
+!src/
+!src/**
+!third_party/
+!third_party/kubernetes/
+!third_party/kubernetes/**
+**/*_test.go

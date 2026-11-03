@@ -44,19 +44,19 @@ func (r *Runner) Bind(ctx context.Context, a *Attempt) error {
 // bindingRequests 先把整轮请求组装好，再发网络请求；每个请求都带原 Pod UID。
 // 请求里只有 Pod 身份和目标节点，不更新 informer 中的 Pod，也不重新选点。
 func bindingRequests(a *Attempt) ([]*corev1.Binding, error) {
-	if !a.Reserved || a.Request.Unit.Group.Namespace == "" || len(a.Request.Members) == 0 || len(a.Plan) != len(a.Request.Members) {
-		return nil, fmt.Errorf("Bind 需要已 Assume 的完整成员与计划")
+	if !a.Reserved || a.Request.Unit.Group.Namespace == "" || len(a.AssumedMembers) == 0 || len(a.Plan) != len(a.AssumedMembers) {
+		return nil, fmt.Errorf("Bind 需要与实际暂占成员一致的计划")
 	}
-	bindings := make([]*corev1.Binding, 0, len(a.Request.Members))
+	bindings := make([]*corev1.Binding, 0, len(a.AssumedMembers))
 	seen := make(map[workqueue.PodRef]bool)
-	for _, ref := range a.Request.Members {
+	for _, ref := range a.AssumedMembers {
 		if ref.Name == "" || ref.UID == "" || a.Plan[ref] == "" || seen[ref] {
 			return nil, fmt.Errorf("Bind 成员 %s 缺少身份、目标节点或重复出现", ref.Name)
 		}
 		seen[ref] = true
 		bindings = append(bindings, &corev1.Binding{
 			ObjectMeta: metav1.ObjectMeta{Namespace: a.Request.Unit.Group.Namespace, Name: ref.Name, UID: ref.UID},
-			Target: corev1.ObjectReference{Kind: "Node", Name: a.Plan[ref]},
+			Target:     corev1.ObjectReference{Kind: "Node", Name: a.Plan[ref]},
 		})
 	}
 	return bindings, nil

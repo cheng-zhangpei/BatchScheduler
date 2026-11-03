@@ -17,25 +17,33 @@ func (r *Runner) Assume(ctx context.Context, a *Attempt) error {
 	if r.resources == nil {
 		return fmt.Errorf("%w: Assume 缺少共享资源账", staging.ErrHandlerUnavailable)
 	}
-	if len(a.members) == 0 || len(a.members) != len(a.Request.Members) || len(a.Plan) != len(a.members) {
+	if len(a.members) == 0 || len(a.members) != len(a.Request.Members) || len(a.Plan) == 0 ||
+		(a.Request.Mode != workqueue.AllowPartial && len(a.Plan) != len(a.members)) {
 		return fmt.Errorf("Assume 的本轮成员或计划不完整")
 	}
 	expected := make(map[workqueue.PodRef]bool, len(a.Request.Members))
 	for _, ref := range a.Request.Members {
 		expected[ref] = true
 	}
-	// 用 Filter 保存的完整成员和最终计划组装暂占记录，不修改原 Pod 对象。
-	batch := make([]resourcecache.Assumption, 0, len(a.members))
-	assumed := make([]workqueue.PodRef, 0, len(a.members))
+	// 只给计划中有位置的成员暂占资源。Atomic 的计划须覆盖所有成员。
+	batch := make([]resourcecache.Assumption, 0, len(a.Plan))
+	assumed := make([]workqueue.PodRef, 0, len(a.Plan))
 	for _, pod := range a.members {
 		ref := workqueue.PodRef{Name: pod.Name, UID: pod.UID}
-		if !expected[ref] || a.Plan[ref] == "" {
+		node, placed := a.Plan[ref]
+		if !placed {
+			continue
+		}
+		if !expected[ref] || node == "" {
 			return fmt.Errorf("Assume 成员 %s 不属于本轮或没有目标节点", pod.Name)
 		}
 		copy := pod.DeepCopy()
-		copy.Spec.NodeName = a.Plan[ref]
+		copy.Spec.NodeName = node
 		batch = append(batch, resourcecache.Assumption{Unit: a.Request.Unit, ActionID: a.Request.ActionID, Pod: copy})
 		assumed = append(assumed, ref)
+	}
+	if len(batch) != len(a.Plan) {
+		return fmt.Errorf("Assume 计划含有不属于本轮的成员")
 	}
 	if err := r.resources.Assume(batch); err != nil {
 		return err

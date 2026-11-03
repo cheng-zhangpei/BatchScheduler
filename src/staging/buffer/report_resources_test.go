@@ -11,18 +11,25 @@ import (
 )
 
 func TestEvaluateUnplacedPreservesRunningMembers(t *testing.T) {
-	for _, reason := range []string{workqueue.ReasonUnschedulable, workqueue.ReasonForbidden} {
-		t.Run(reason, func(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		queue  workqueue.QueueName
+	}{
+		{workqueue.ReasonUnschedulable, workqueue.QueueRetry},
+		{workqueue.ReasonForbidden, workqueue.QueueFail},
+		{workqueue.ReasonSchedulingError, workqueue.QueueFail},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
 			b, f := startPartialResourceReport(t)
-			f.Resources.Unplaced[0].Failure.Reason = reason
+			f.Resources.Unplaced[0].Failure.Reason = tc.reason
 			if err := b.Report(context.Background(), f); err != nil {
 				t.Fatal(err)
 			}
 			r := b.records[f.Unit]
 			revision := r.Revision
 			d := decisionFor(t, b, f.Unit)
-			if d.Action != staging.ActionReturnMembers || d.To != workqueue.QueueFail || len(d.Members) != 1 ||
-				d.Members[0] != f.Resources.Unplaced[0].Pod || d.Failure == nil || d.Failure.Reason != reason {
+			if d.Action != staging.ActionReturnMembers || d.To != tc.queue || len(d.Members) != 1 ||
+				d.Members[0] != f.Resources.Unplaced[0].Pod || d.Failure == nil || d.Failure.Reason != tc.reason {
 				t.Fatalf("没有生成针对未放置成员的回送决定: %+v", d)
 			}
 			if r.Revision != revision || r.PendingAction != f.ActionID || len(r.Unit.Members()) != 2 || len(b.owners[f.Unit.Group]) != 2 {

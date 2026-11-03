@@ -50,10 +50,19 @@ func validateFeedback(r *staging.Record, f staging.Feedback) error {
 		plan = r.Plan
 	}
 	if f.Plan != nil || (rank >= phaseOrder(staging.PhasePlanned) && rank <= phaseOrder(staging.PhaseBound)) {
-		if len(plan) != len(r.Members) {
+		members := r.Unit.Members()
+		resources := f.Resources
+		if resources == nil {
+			resources = r.Resources
+		}
+		// 部分计划只列成功暂占的成员。也允许先报告完整计划，再在暂占反馈里区分成员。
+		if resources != nil && len(plan) < len(members) {
+			members = resources.Assumed
+		}
+		if len(plan) != len(members) {
 			return fmt.Errorf("反馈缺少完整成员计划")
 		}
-		for ref := range r.Members {
+		for _, ref := range members {
 			if plan[ref] == "" {
 				return fmt.Errorf("成员 %s 没有目标节点", ref.Name)
 			}

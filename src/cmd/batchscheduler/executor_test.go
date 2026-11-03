@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -45,6 +47,11 @@ func executorFixture(t *testing.T, configs ...execution.Config) (*buffer.Buffer,
 // queuedExecutorFixture 保留入队后的任务，供测试真实 Active 消费循环，不手动 Pop/Accept。
 func queuedExecutorFixture(t *testing.T, configs ...execution.Config) (*buffer.Buffer, *workqueue.WorkQueue, *execution.Executor, *group.View, *resourcecache.Cache) {
 	t.Helper()
+	return queuedExecutorFixtureWithMembers(t, 1, configs...)
+}
+
+func queuedExecutorFixtureWithMembers(t *testing.T, count int, configs ...execution.Config) (*buffer.Buffer, *workqueue.WorkQueue, *execution.Executor, *group.View, *resourcecache.Cache) {
+	t.Helper()
 	key := group.Key{Namespace: "work", Name: "job", UID: "group"}
 	controller := true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: "pod", UID: "pod",
@@ -53,7 +60,13 @@ func queuedExecutorFixture(t *testing.T, configs ...execution.Config) (*buffer.B
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 	}}}}}
 	view := &group.View{Group: &scheduling.PodGroup{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, UID: key.UID},
-		Spec: scheduling.PodGroupSpec{Members: 1, SubmitMode: string(workqueue.AllTogether)}}, Members: []group.PodView{{Group: key, Pod: pod}}}
+		Spec: scheduling.PodGroupSpec{Members: int32(count), SubmitMode: string(workqueue.AllTogether)}}, Members: []group.PodView{{Group: key, Pod: pod}}}
+	for i := 1; i < count; i++ {
+		member := pod.DeepCopy()
+		member.Name = fmt.Sprintf("pod-%d", i)
+		member.UID = types.UID(member.Name)
+		view.Members = append(view.Members, group.PodView{Group: key, Pod: member})
+	}
 	reader := executorTestViews{view}
 	nodes := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{

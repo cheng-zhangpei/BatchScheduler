@@ -63,14 +63,12 @@ func (h workQueueHandlers) handoff(ctx context.Context, request staging.Handoff)
 	case staging.ActionRelease:
 		return h.queues.ReleaseUnit(request.Unit.Key())
 	case staging.ActionReturn, staging.ActionReturnMembers:
-		if request.Decision.To != workqueue.QueueFail {
-			return fmt.Errorf("失败回送目前只支持进入 Fail")
-		}
 		// Return 结束旧轮次；ReturnMembers 只交回未放置成员，让旧轮次继续执行。
 		return h.queues.Select(workqueue.SelectRequest{Return: &workqueue.ReturnRequest{
 			Previous: request.Unit.Key(), Members: request.Decision.Members,
 			Failure: request.Decision.Failure, RecoveryComplete: true,
 			KeepPrevious: request.Decision.Action == staging.ActionReturnMembers,
+			To:           request.Decision.To,
 		}})
 	default:
 		return fmt.Errorf("未知 Handoff 动作: %s", request.Decision.Action)

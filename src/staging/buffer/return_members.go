@@ -16,8 +16,8 @@ func (b *Buffer) applyReturnMembers(ctx context.Context, d staging.Decision) err
 	if b.handlers.Handoff == nil {
 		return staging.ErrHandlerUnavailable
 	}
-	if d.Unit == nil || len(d.Members) == 0 || d.Failure == nil || d.To != workqueue.QueueFail {
-		return fmt.Errorf("部分回送需要旧 Unit、成员、错误以及 Fail 目标")
+	if d.Unit == nil || len(d.Members) == 0 || d.Failure == nil || (d.To != workqueue.QueueFail && d.To != workqueue.QueueRetry) {
+		return fmt.Errorf("部分回送需要旧 Unit、成员、错误及有效的目标队列")
 	}
 
 	// 1. 记下正在交接，暂时不结束旧轮次。绑定反馈仍然可以更新这份 Record。
@@ -59,7 +59,7 @@ func (b *Buffer) applyReturnMembers(ctx context.Context, d staging.Decision) err
 			delete(b.owners[d.Group], ref.UID)
 		}
 	}
-	// 继续检查其他未放置成员，并让新 Fail 任务有机会按错误类型进入 Retry。
+	// 继续检查其他未放置成员和队列中等待的任务。
 	b.evaluations.Add(d.Group)
 	return nil
 }

@@ -33,10 +33,10 @@ func TestSelectBestUsesSearchOrderAndCopiesPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selected[ref] != "node-a" {
+	if selected.Placements[ref] != "node-a" {
 		t.Fatal("应沿用搜索的通信排序，不能按 Pod 分数重新选节点")
 	}
-	selected[ref] = "node-b"
+	selected.Placements[ref] = "node-b"
 	if plans[0].Placements[ref] != "node-a" {
 		t.Fatal("执行器修改返回计划时影响了原候选")
 	}

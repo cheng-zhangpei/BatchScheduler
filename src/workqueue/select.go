@@ -56,6 +56,7 @@ type QueueDecision struct {
 	Reason           string
 	Message          string
 	WaitingFor       string
+	RetryPlan        RetryPlan // 直接回送 Retry 时的等待条件。
 }
 
 type SelectionPolicy func(SelectionInput, Unit) (QueueDecision, error)

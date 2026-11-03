@@ -8,7 +8,6 @@ import (
 
 	"batchscheduler/src/scheduler"
 	"batchscheduler/src/staging"
-	"batchscheduler/src/workqueue"
 )
 
 // Planner 的插件在启动前设置；Plan 内部按固定顺序调用，不需要 Buffer 协调这些环节。
@@ -18,19 +17,19 @@ type Planner struct {
 	Concentration ConcentrationPlugin
 }
 
-// Plan 接收 Pod 评分后的输入，最后返回本轮唯一的 Pod → Node 计划。
-func (p *Planner) Plan(ctx context.Context, input scheduler.GroupScoreInput) (map[workqueue.PodRef]string, error) {
+// Plan 接收 Pod 评分后的输入，返回选中的节点位置和未放置成员。
+func (p *Planner) Plan(ctx context.Context, input scheduler.GroupScoreInput) (PlanResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return PlanResult{}, err
 	}
 
 	// 环节一：链路放置。插件内部组合链路，返回多套完整候选方案。
 	if p.Placement == nil {
-		return nil, fmt.Errorf("%w: 链路放置插件未配置", staging.ErrHandlerUnavailable)
+		return PlanResult{}, fmt.Errorf("%w: 链路放置插件未配置", staging.ErrHandlerUnavailable)
 	}
 	plans, err := p.Placement.Place(ctx, input)
 	if err != nil {
-		return nil, err
+		return PlanResult{}, err
 	}
 
 	// 环节二：可选的集中评分。各套方案增加一项资源整合分，位置保持原样。
@@ -38,7 +37,7 @@ func (p *Planner) Plan(ctx context.Context, input scheduler.GroupScoreInput) (ma
 		for i := range plans {
 			score, err := p.Concentration.Score(ctx, input, plans[i])
 			if err != nil {
-				return nil, err
+				return PlanResult{}, err
 			}
 			plans[i].Scores.Consolidation = &score
 		}

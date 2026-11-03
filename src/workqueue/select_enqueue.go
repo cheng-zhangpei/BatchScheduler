@@ -46,7 +46,7 @@ func (w *WorkQueue) publishUnit(unit Unit, decision QueueDecision) {
 	case QueueFail:
 		w.Fail.Put(Failure{Unit: unit, Reason: decision.Reason, Message: decision.Message, RecoveryComplete: decision.RecoveryComplete})
 	case QueueRetry:
-		w.Retry.Put(Retry{Unit: unit, WaitingFor: decision.WaitingFor})
+		w.Retry.Put(Retry{Unit: unit, WaitingFor: decision.WaitingFor, Plan: decision.RetryPlan})
 	case QueueFastRetry:
 		w.FastRetry.Add(unit)
 	}

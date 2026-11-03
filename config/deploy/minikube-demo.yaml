@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: batchscheduler-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: batchscheduler
+  namespace: batchscheduler-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: batchscheduler-demo-observer
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.batchscheduler.io"]
+    resources: ["podgroups"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: batchscheduler-demo-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: batchscheduler-demo-observer
+subjects:
+  - kind: ServiceAccount
+    name: batchscheduler
+    namespace: batchscheduler-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: batchscheduler-bind
+  namespace: batchscheduler-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods/binding"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: batchscheduler-bind
+  namespace: batchscheduler-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: batchscheduler-bind
+subjects:
+  - kind: ServiceAccount
+    name: batchscheduler
+    namespace: batchscheduler-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batchscheduler
+  namespace: batchscheduler-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: batchscheduler
+  template:
+    metadata:
+      labels:
+        app: batchscheduler
+    spec:
+      serviceAccountName: batchscheduler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scheduler
+          image: chengzhangpei/batchscheduler:20261103-preview
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: history
+              mountPath: /var/lib/batchscheduler
+      volumes:
+        - name: history
+          emptyDir: {}

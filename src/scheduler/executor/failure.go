@@ -6,6 +6,7 @@ import (
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler"
+	"batchscheduler/src/scheduler/planner"
 	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/workqueue"
@@ -15,8 +16,9 @@ type schedulingFailure struct{ info group.FailureInfo }
 
 func (e *schedulingFailure) Error() string { return e.info.Message }
 
-// noCandidateFailure 把实际过滤结果转成已有内部错误；候选缺失不等于程序执行出错。
-func noCandidateFailure(members []workqueue.PodRef, results map[workqueue.PodRef]scheduler.PodFilterResult) error {
+// unplacedAfterFilter 收集 Partial 中没有候选的成员。需要整组放置时，遇到第一个失败就结束。
+func unplacedAfterFilter(members []workqueue.PodRef, results map[workqueue.PodRef]scheduler.PodFilterResult, allowPartial bool) ([]planner.UnplacedMember, error) {
+	var unplaced []planner.UnplacedMember
 	for _, ref := range members {
 		result := results[ref]
 		if len(result.Candidates) != 0 {
@@ -42,9 +44,17 @@ func noCandidateFailure(members []workqueue.PodRef, results map[workqueue.PodRef
 				reason = workqueue.ReasonPlacementConstraints
 			}
 		}
-		return &schedulingFailure{info: group.FailureInfo{Reason: reason, Message: fmt.Sprintf("Pod %s 没有可行节点（%s）", ref.Name, reason)}}
+		failure := group.FailureInfo{Reason: reason, Message: fmt.Sprintf("Pod %s 没有可行节点（%s）", ref.Name, reason)}
+		if !allowPartial {
+			return nil, &schedulingFailure{info: failure}
+		}
+		unplaced = append(unplaced, planner.UnplacedMember{Pod: ref, Failure: failure})
 	}
-	return nil
+	if len(unplaced) != 0 && len(unplaced) == len(members) {
+		// 没有成员能进入评分，整轮沿用第一个失败原因回送。
+		return nil, &schedulingFailure{info: unplaced[0].Failure}
+	}
+	return unplaced, nil
 }
 
 func executionFailure(err error) *group.FailureInfo {
@@ -57,8 +67,8 @@ func executionFailure(err error) *group.FailureInfo {
 		failure := known.info
 		return &failure
 	}
-	// Assume 复核的是选定计划。资源与端口暂时不满足时等待相关调度条件变化，节点消失则等节点变化。
-	if errors.Is(err, resourcecache.ErrAssumeNoFit) {
+	// 搜索没有找到方案，或 Assume 复核时方案已放不下，都等待相关调度条件变化。
+	if errors.Is(err, planner.ErrNoFeasiblePlan) || errors.Is(err, resourcecache.ErrAssumeNoFit) {
 		return &group.FailureInfo{Reason: workqueue.ReasonUnschedulable, Message: err.Error()}
 	}
 	if errors.Is(err, resourcecache.ErrAssumeNodeMissing) {

@@ -9,7 +9,8 @@ import (
 // Placements 保存每个成员选中的节点；Scores 保存三项分数；Communication 保存逐条关系结果。
 // 它是本地规划结果，后续选出最终方案后才进入 Assume 和 Bind。
 type CandidatePlan struct {
-	Placements    map[workqueue.PodRef]string // 本轮每个 Pod → 候选节点名。
+	Placements    map[workqueue.PodRef]string // 本轮找到位置的 Pod → 候选节点名。
+	Unplaced      []UnplacedMember
 	Scores        PlanScores
 	Communication []CommunicationResult // 每条关系实际放到了哪个靠近等级，供最终汇总继续权衡。
 	Notes         []string              // 解释方案，例如哪条通信关系降级、为什么降级。
