@@ -19,6 +19,12 @@ func EvaluateRecord(key workqueue.UnitKey, record *staging.Record, invalidGroup 
 		return partial
 	}
 
+	// Bind 已返回未知结果时，Informer 看到的绑定可以补上那次丢失的确认。
+	if _, confirmed := ObservedBindingSuccess(record); confirmed && !invalidGroup {
+		decision.Action, decision.Reason = staging.ActionRelease, "AttemptComplete"
+		return decision
+	}
+
 	// 1. 先检查能不能继续判断：操作没做完就等，观察信息不足也先等。
 	if reason := evaluationWaitReason(record); reason != "" {
 		decision.Reason = reason

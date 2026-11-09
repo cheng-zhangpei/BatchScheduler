@@ -71,6 +71,7 @@ func (b *Buffer) observe(ctx context.Context, observation staging.Observation, n
 			fact := staging.ObservedPod{Known: exists}
 			if member, ok := current[ref]; ok {
 				pod := member.Pod
+				// 用名称和 UID 找到本轮的 Pod，再记录 API 已写入的节点。即使 Bind 没收到响应，这里也能看到结果。
 				fact.Present, fact.Deleting, fact.NodeName = true, pod.DeletionTimestamp != nil, pod.Spec.NodeName
 				fact.Status = *pod.Status.DeepCopy()
 				// 原生错误在这里转为内部错误，Evaluate 以后只读 Failure，不再解析 Reason。

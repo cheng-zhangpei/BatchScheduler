@@ -26,6 +26,22 @@ func TestObserveRefreshesFactsWithoutChangingOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := u.Members()[0]
+	ctx := context.Background()
+	request, _, err := b.beginAction(decisionFor(t, b, u.Key()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := staging.Feedback{Unit: request.Unit, ActionID: request.ActionID, Operation: request.Operation,
+		Kind: staging.FeedbackProgress, Phase: staging.PhaseBinding, Plan: map[workqueue.PodRef]string{ref: "node-a"}}
+	if err := b.Report(ctx, feedback); err != nil {
+		t.Fatal(err)
+	}
+	feedback.Kind, feedback.Phase = staging.FeedbackUnknown, staging.PhaseRecovering
+	feedback.Failure = &group.FailureInfo{Reason: workqueue.ReasonBindingUnknown}
+	if err := b.Report(ctx, feedback); err != nil {
+		t.Fatal(err)
+	}
+	// Bind 的响应超时之后，Informer 才看到同一个 Pod 已绑定到计划节点。
 	view.Members[0].Pod.Spec.NodeName = "node-a"
 	view.Members[0].Pod.Status.Phase = corev1.PodRunning
 	view.Members[0].Pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"}}
@@ -40,8 +56,9 @@ func TestObserveRefreshesFactsWithoutChangingOwnership(t *testing.T) {
 	if fact.Status.Conditions[0].Reason != "ContainersNotReady" {
 		t.Fatal("观察记录共享了缓存的可变字段")
 	}
-	if b.records[u.Key()].Members[ref].Phase != group.PodUnscheduled || !b.ContainsPod(u.Key().Group, ref.UID) {
-		t.Fatal("观察不应擅自覆盖执行状态或释放归属")
+	record := b.records[u.Key()]
+	if record.PendingAction != request.ActionID || record.ExecutionPhase != staging.PhaseRecovering || !b.ContainsPod(u.Key().Group, ref.UID) {
+		t.Fatal("观察应保存绑定事实，并保留本轮的等待状态和成员归属")
 	}
 	// 同名新 Pod 不应继承旧成员；记录成员已离开，不等同于确认旧绑定失败。
 	view.Members[0].Pod.UID = "replacement"

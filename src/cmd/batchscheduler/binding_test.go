@@ -210,14 +210,14 @@ func TestBindingRejectionRecoversAndTransitionsToRetry(t *testing.T) {
 	t.Fatal("临时绑定拒绝没有进入带退避条件的 Retry")
 }
 
-func TestBindingUnknownKeepsBufferPendingAndReservation(t *testing.T) {
+func TestBindingUnknownReleasesAfterMatchingObservation(t *testing.T) {
 	config := execution.DefaultConfig()
 	client := fake.NewClientset()
 	client.PrependReactor("create", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, context.DeadlineExceeded
 	})
 	config.Client = client
-	b, unit, executor, _, resources := executorFixture(t, config)
+	b, unit, executor, view, resources := executorFixture(t, config)
 	unknown := make(chan staging.Feedback, 1)
 	executor.Report = func(ctx context.Context, f staging.Feedback) error {
 		if err := b.Report(ctx, f); err != nil {
@@ -240,6 +240,42 @@ func TestBindingUnknownKeepsBufferPendingAndReservation(t *testing.T) {
 	}
 	if decision := executionDecision(t, b, unit); decision.Action != staging.ActionWait || decision.Reason != "OperationInFlight" {
 		t.Fatalf("未知结果没有保留 Pending: %+v", decision)
+	}
+
+	// 同名新 Pod，或原 Pod 被绑到了别处，都不能确认这次 Bind 成功。
+	bound := view.Members[0].Pod.DeepCopy()
+	replacement := bound.DeepCopy()
+	replacement.UID, replacement.Spec.NodeName = "replacement", "node-a"
+	wrongNode := bound.DeepCopy()
+	wrongNode.Spec.NodeName = "node-other"
+	for _, pod := range []*corev1.Pod{replacement, wrongNode} {
+		view.Members[0].Pod = pod
+		if d := executionDecision(t, b, unit); d.Action != staging.ActionWait {
+			t.Fatalf("不匹配的绑定观察提前结束了本轮: %+v", d)
+		}
+	}
+
+	// 模拟 Informer 最终看到原 Pod 绑定到了计划节点。
+	bound.Spec.NodeName = "node-a"
+	if err := resources.UpdatePod(bound); err != nil {
+		t.Fatal(err)
+	}
+	view.Members[0].Pod = bound
+	d := executionDecision(t, b, unit)
+	if d.Action != staging.ActionRelease || d.Reason != "AttemptComplete" {
+		t.Fatalf("匹配的绑定观察没有生成 Release: %+v", d)
+	}
+	ctx := context.Background()
+	if err := b.Apply(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	groupContext, err := b.GroupContext(ctx, unit.Key().Group)
+	if err != nil || len(groupContext.InFlight) != 0 || len(groupContext.Succeeded) != 1 || unit.State().Phase != workqueue.UnitDone {
+		t.Fatalf("超时轮次没有清理并归档: %+v, err=%v", groupContext, err)
+	}
+	snapshot := resources.Snapshot()
+	if snapshot.Nodes["node-a"].GetRequested().GetMilliCPU() != 1000 || len(snapshot.BoundPods) != 1 {
+		t.Fatal("Release 清理了已确认绑定的占用或重复计账")
 	}
 }
 

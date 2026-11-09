@@ -3,7 +3,9 @@ package buffer
 import (
 	"fmt"
 
+	"batchscheduler/src/group"
 	"batchscheduler/src/staging"
+	"batchscheduler/src/staging/evaluation"
 	"batchscheduler/src/workqueue"
 )
 
@@ -16,8 +18,19 @@ func (b *Buffer) beginAction(d staging.Decision) (staging.Execution, staging.Han
 		return staging.Execution{}, staging.Handoff{}, fmt.Errorf("操作缺少 Unit")
 	}
 	r := b.records[*d.Unit]
-	if r == nil || r.Revision != d.Revision || r.PendingAction != "" || r.ReturningMembers {
+	if r == nil || r.Revision != d.Revision || r.ReturningMembers {
 		return staging.Execution{}, staging.Handoff{}, staging.ErrStaleDecision
+	}
+	if r.PendingAction != "" {
+		ref, confirmed := evaluation.ObservedBindingSuccess(r)
+		if d.Action != staging.ActionRelease || !confirmed {
+			return staging.Execution{}, staging.Handoff{}, staging.ErrStaleDecision
+		}
+		// 同一个 Pod 已绑定，先结清旧执行，再登记下方的 Release，归档时就能读到成功状态。
+		state := r.Members[ref]
+		state.Phase = group.PodBound
+		r.Members[ref] = state
+		r.ExecutionPhase, r.Failure, r.ResponsibilitiesSettled = staging.PhaseBound, nil, true
 	}
 	b.nextAction++
 	id := fmt.Sprintf("action-%d", b.nextAction)
