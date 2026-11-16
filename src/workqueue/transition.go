@@ -42,7 +42,7 @@ type TransitionRequest struct {
 	// 需要撤销的预留已清理，且本轮固定成员仍可重试；无须清理也要明确置 true。
 	// 当前是调用方契约，不代表 Transition 已实现实际资源/集群校验。
 	RecoveryComplete bool
-	RetryAfter       time.Time  // 时间型重试必填；事件型可选，时间和事件条件须同时满足。
+	RetryAfter       time.Time  // 未指定时，用成员连续失败次数计算退避。
 	Wake             *RetryWake // 仅 Retry → Active 使用；由事件入口或定时入口提供。
 }
 
@@ -74,7 +74,8 @@ func (w *WorkQueue) Transition(request TransitionRequest) error {
 		// 完全相同的请求重放安全，不重置退避时间，也不覆盖已存在的等待计划。
 		if retry, ok := w.Retry.Get(key); ok && retry.Unit.State().Queue == QueueRetry {
 			state := retry.Unit.State()
-			if (request.Reason == "" || (state.LastFailure != nil && request.Reason == state.LastFailure.Reason)) && retry.Plan.NotBefore.Equal(request.RetryAfter) {
+			if (request.Reason == "" || (state.LastFailure != nil && request.Reason == state.LastFailure.Reason)) &&
+				(request.RetryAfter.IsZero() || retry.Plan.NotBefore.Equal(request.RetryAfter)) {
 				return nil
 			}
 		}
@@ -102,13 +103,19 @@ func (w *WorkQueue) Transition(request TransitionRequest) error {
 	if record == nil || record.units[key.ID] == nil || record.group.Phase == group.GroupDeleting {
 		return fmt.Errorf("单元缺少有效的组归属或组正在删除")
 	}
+	failedAttempts := 0
 	for _, member := range unit.Members() {
 		pod := record.pods[member.UID]
 		if pod == nil || pod.UnitID != key.ID || pod.Phase != group.PodUnscheduled {
 			return fmt.Errorf("成员归属或状态不允许重试，需先完成结果确认和清理")
 		}
+		failedAttempts = max(failedAttempts, pod.FailedAttempts)
 	}
-	plan, err := PlanRetry(failure.Reason, request.RetryAfter)
+	deadline := request.RetryAfter
+	if deadline.IsZero() {
+		deadline = retryDeadline(time.Now(), failedAttempts)
+	}
+	plan, err := PlanRetry(failure.Reason, deadline)
 	if err != nil {
 		return err
 	}

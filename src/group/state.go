@@ -26,9 +26,10 @@ type PodState struct {
 	Phase PodSchedulingPhase
 	// UnitID 表示当前所属单元，其组身份沿用 PodView.Group。
 	// 空值表示尚未归入单元；分配及解除规则尚未实现。
-	UnitID      string
-	PlannedNode string // 本地计划，不冒充 API 中的 spec.nodeName。
-	LastFailure *FailureInfo
+	UnitID         string
+	PlannedNode    string // 本地计划，不冒充 API 中的 spec.nodeName。
+	LastFailure    *FailureInfo
+	FailedAttempts int // WorkQueue 按 Pod UID 记录，失败回送换 Unit 时继续累计。
 }
 
 // GroupPhase 概括组在调度层的进展，不表示某个队列的位置或业务计算结果。

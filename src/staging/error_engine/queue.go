@@ -1,10 +1,6 @@
 package errorengine
 
-import (
-	"time"
-
-	"batchscheduler/src/workqueue"
-)
+import "batchscheduler/src/workqueue"
 
 // decideQueuedError 先看任务在 Fail 还是 Retry，再调用对应的判断函数。
 func decideQueuedError(input Input) (Decision, bool) {
@@ -31,11 +27,9 @@ func decideFailedQueue(input Input) (Decision, bool) {
 	}
 	switch entry.Failure.Reason {
 	case workqueue.ReasonUnschedulable, workqueue.ReasonInsufficientResources, workqueue.ReasonNodeUnavailable,
-		workqueue.ReasonPlacementConstraints, workqueue.ReasonDependencyNotReady:
-		// 这些错误可以进入 Retry，但之后仍要等资源、节点等相关条件变化。
-	case workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected:
-		// 第一版统一退避一秒；具体时长后续再讨论，不在此新增复杂策略。
-		request.RetryAfter = input.Now.Add(time.Second)
+		workqueue.ReasonPlacementConstraints, workqueue.ReasonDependencyNotReady,
+		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected:
+		// WorkQueue 根据成员失败次数登记退避截止时间。
 	default:
 		// 权限、无效声明、绑定未知及未识别错误都不能自动重试。
 		return Decision{}, false

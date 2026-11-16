@@ -79,6 +79,16 @@ func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 			if err := b.Apply(ctx, d); err != nil {
 				t.Fatal(err)
 			}
+			// 提前到的资源事件先记住，退避结束时只靠定时检查即可唤醒。
+			queued = w.GroupSnapshot(old.Key().Group)
+			b.mu.RLock()
+			ready := b.evaluateQueuedUnits(queued, view, queued[0].Retry.Plan.NotBefore)
+			b.mu.RUnlock()
+			for _, decision := range ready {
+				if err := b.Apply(ctx, decision); err != nil {
+					t.Fatal(err)
+				}
+			}
 			active, err := w.Active.Pop(ctx)
 			if err != nil || active != next {
 				t.Fatalf("没有取到下一轮任务: %v", err)

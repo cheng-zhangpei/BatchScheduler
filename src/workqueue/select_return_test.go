@@ -2,9 +2,49 @@ package workqueue
 
 import (
 	"testing"
+	"time"
 
 	"batchscheduler/src/group"
 )
+
+func TestRetryBackoffGrowsAcrossReturnedUnits(t *testing.T) {
+	view := testView("work", "retry-backoff", AllTogether, 2, 2)
+	w := queueFor(view)
+	selectOK(t, w, SelectRequest{View: view})
+	for _, seconds := range []time.Duration{1, 2, 4, 8, 10, 10} {
+		old := drainActive(t, w, 1)[0]
+		if err := old.MarkProcessing(); err != nil {
+			t.Fatal(err)
+		}
+		selectOK(t, w, SelectRequest{Return: &ReturnRequest{Previous: old.Key(), Members: old.Members(),
+			Failure: &group.FailureInfo{Reason: ReasonInsufficientResources}, RecoveryComplete: true}})
+		next := w.GroupSnapshot(old.Key().Group)[0].Unit
+		if next.Key() == old.Key() {
+			t.Fatal("失败回送应生成新 Unit")
+		}
+		move := TransitionRequest{Unit: next, From: QueueFail, To: QueueRetry, RecoveryComplete: true}
+		before := time.Now()
+		if err := w.Transition(move); err != nil {
+			t.Fatal(err)
+		}
+		retry, _ := w.Retry.Get(next.Key())
+		deadline := retry.Plan.NotBefore
+		delay := seconds * time.Second
+		if deadline.Before(before.Add(delay)) || deadline.After(time.Now().Add(delay)) {
+			t.Fatalf("本轮退避应为 %s，实际截止时间为 %v", delay, deadline)
+		}
+		if err := w.Transition(move); err != nil {
+			t.Fatal(err)
+		}
+		if current, _ := w.Retry.Get(next.Key()); !current.Plan.NotBefore.Equal(deadline) {
+			t.Fatal("重复迁移延长了退避时间")
+		}
+		if err := w.Transition(TransitionRequest{Unit: next, From: QueueRetry, To: QueueActive,
+			Wake: &RetryWake{Changed: RetryOnResources, Now: deadline}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestSelectReturnKeepsPreviousThenEndsOnlyItsRemainingMembers(t *testing.T) {
 	view := testView("work", "partial-return", AllowPartial, 4, 4)

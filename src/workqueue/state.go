@@ -29,8 +29,8 @@ type UnitState struct {
 	Queue       QueueName
 	LastFailure *group.FailureInfo
 	WaitingFor  string
-	// RetryAfter 是调度器决定的最早重试时间，不从 Pod.phase 推断。
-	// nil 表示没有时间门槛；即使时间已到，也可能仍需等待资源等条件。
+	// RetryAfter 记录从 Fail 迁入时登记的时间。Retry 条目的 Plan.NotBefore 是实际门槛，
+	// 也覆盖部分成员直接回送 Retry 的情况。
 	RetryAfter *time.Time
 }
 

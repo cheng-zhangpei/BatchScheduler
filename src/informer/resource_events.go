@@ -1,6 +1,8 @@
 package informer
 
 import (
+	"reflect"
+
 	"batchscheduler/src/workqueue"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,17 +20,36 @@ type ResourceObserver interface {
 // OnResourceChange 在 Run 前注册资源记账。初始 List 和后续 Watch 使用同一套处理函数。
 // ready 不仅等待 informer 的索引填好，也等待这两个处理函数接完初始数据。
 func (i *Informers) OnResourceChange(resources ResourceObserver) error {
-	nodeChanged := func(obj interface{}) {
-		if node, ok := obj.(*corev1.Node); ok {
-			resources.UpdateNode(node)
+	notifyNodeChange := func() {
+		if i.notifyRetry != nil {
+			i.notifyRetry(workqueue.RetryOnResources)
+			i.notifyRetry(workqueue.RetryOnNodes)
+			i.notifyRetry(workqueue.RetryOnPlacement)
 		}
 	}
 	nodes, err := i.factory.Core().V1().Nodes().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    nodeChanged,
-		UpdateFunc: func(_, current interface{}) { nodeChanged(current) },
+		AddFunc: func(obj interface{}) {
+			if node, ok := obj.(*corev1.Node); ok {
+				resources.UpdateNode(node)
+				notifyNodeChange()
+			}
+		},
+		UpdateFunc: func(old, current interface{}) {
+			before, okBefore := old.(*corev1.Node)
+			after, okAfter := current.(*corev1.Node)
+			if okBefore && okAfter {
+				// 同一个回调先写资源账，再让等待中的 Unit 重新选点。
+				resources.UpdateNode(after)
+				if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) ||
+					!reflect.DeepEqual(before.Labels, after.Labels) {
+					notifyNodeChange()
+				}
+			}
+		},
 		DeleteFunc: func(obj interface{}) {
 			if node, ok := deletedObject(obj).(*corev1.Node); ok {
 				resources.RemoveNode(node)
+				notifyNodeChange()
 			}
 		},
 	})

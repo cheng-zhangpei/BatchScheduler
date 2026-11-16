@@ -1,37 +1,16 @@
 package informer
 
 import (
-	"reflect"
-
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
-// OnRetryChange 在 Run 前接好重试通知。已绑定 Pod 的释放提示由资源记账回调发出。
+// OnRetryChange 在 Run 前接好重试通知。Node 变化和已绑定 Pod 删除由资源记账回调通知。
 // 只表示条件可能改善，不保证能够调度；不在回调执行 Transition。
 // TODO：DependencyNotReady 对应的依赖资源 informer 尚未实现。
 func (i *Informers) OnRetryChange(notify func(workqueue.RetryCondition)) error {
-	nodeChanged := func(interface{}) {
-		notify(workqueue.RetryOnResources)
-		notify(workqueue.RetryOnNodes)
-		notify(workqueue.RetryOnPlacement)
-	}
-	_, err := i.factory.Core().V1().Nodes().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: nodeChanged, DeleteFunc: nodeChanged,
-		UpdateFunc: func(old, current interface{}) {
-			before, okBefore := old.(*corev1.Node)
-			after, okAfter := current.(*corev1.Node)
-			if okBefore && okAfter && (!reflect.DeepEqual(before.Spec, after.Spec) ||
-				!reflect.DeepEqual(before.Status, after.Status) || !reflect.DeepEqual(before.Labels, after.Labels)) {
-				nodeChanged(current)
-			}
-		},
-	})
-	if err != nil {
-		return err
-	}
-	_, err = i.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err := i.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(old, current interface{}) {
 			before, okBefore := old.(*corev1.Pod)
 			after, okAfter := current.(*corev1.Pod)

@@ -62,6 +62,11 @@ func TestAutomaticQueueFlowFromEvaluation(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitForQueue(t, ctx, unit, workqueue.QueueRetry)
+			entries := w.GroupSnapshot(unit.Key().Group)
+			if len(entries) != 1 || entries[0].Retry.Plan.NotBefore.IsZero() {
+				t.Fatal("Retry 没有登记退避截止时间")
+			}
+			deadline := entries[0].Retry.Plan.NotBefore
 			if reason == workqueue.ReasonInsufficientResources || reason == workqueue.ReasonUnschedulable {
 				b.NotifyRetry(workqueue.RetryOnDependency) // 不相关事件不得唤醒资源/通用调度等待。
 				ds, err := b.Evaluate(ctx, unit.Key().Group)
@@ -79,7 +84,10 @@ func TestAutomaticQueueFlowFromEvaluation(t *testing.T) {
 			if err != nil || got.Key() != unit.Key() {
 				t.Fatalf("自动恢复未到 Active: %v", err)
 			}
-			if _, exists := w.Retry.Get(unit.Key()); exists {
+			if time.Now().Before(deadline) {
+				t.Fatal("退避尚未到期就取到了 Active 任务")
+			}
+			if len(w.GroupSnapshot(unit.Key().Group)) != 0 {
 				t.Fatal("迁移后 Retry 未清理")
 			}
 			select {

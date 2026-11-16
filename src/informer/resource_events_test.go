@@ -184,3 +184,64 @@ func TestPodDeletionNotifiesRetryAfterReleasingResources(t *testing.T) {
 		t.Fatal("已绑定 Pod 删除后没有发出资源变化通知")
 	}
 }
+
+func TestNodeUpdateNotifiesRetryAfterUpdatingResources(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: "node"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}}}
+	client := fake.NewClientset(node)
+	groups := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{scheduling.PodGroupGVR: "PodGroupList"})
+	observed, err := New(client, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := resourcecache.New()
+	if err := observed.OnResourceChange(resources); err != nil {
+		t.Fatal(err)
+	}
+	capacityAtWake := make(chan int64, 2)
+	if err := observed.OnRetryChange(func(condition workqueue.RetryCondition) {
+		if condition == workqueue.RetryOnResources {
+			info := resources.SnapshotNodeInfos()[node.Name]
+			if info == nil {
+				capacityAtWake <- 0
+				return
+			}
+			capacityAtWake <- info.GetAllocatable().GetMilliCPU()
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ready, done := make(chan struct{}), make(chan error, 1)
+	go func() { done <- observed.Run(ctx, ready) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		t.Fatal("资源账未完成初始同步")
+	}
+	readCapacity := func(want int64) {
+		t.Helper()
+		select {
+		case got := <-capacityAtWake:
+			if got != want {
+				t.Fatalf("通知 Retry 时节点容量为 %dm，期望 %dm", got, want)
+			}
+		case <-ctx.Done():
+			t.Fatal("没有收到节点资源变化通知")
+		}
+	}
+	readCapacity(2000)
+	updated := node.DeepCopy()
+	updated.Status.Allocatable[corev1.ResourceCPU] = resource.MustParse("4")
+	if _, err := client.CoreV1().Nodes().UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	readCapacity(4000)
+}

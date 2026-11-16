@@ -7,6 +7,7 @@ import (
 
 	execution "batchscheduler/src/scheduler/executor"
 	"batchscheduler/src/staging"
+	"batchscheduler/src/staging/buffer"
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -86,6 +87,7 @@ func TestGroupPlanRetriesAfterCapacityIsReleased(t *testing.T) {
 	if err := b.Apply(ctx, executionDecision(t, b, next)); err != nil {
 		t.Fatal(err)
 	}
+	applyAfterRetryDeadline(t, ctx, b, queues, next)
 	if ready := startAttempt(); ready.Key() != next.Key() {
 		t.Fatalf("应从 Active 取到重新就绪的组单元: %+v", ready.Key())
 	}
@@ -198,11 +200,11 @@ func TestBindingRejectionRecoversAndTransitionsToRetry(t *testing.T) {
 	}
 	for _, d := range decisions {
 		if d.Action == staging.ActionTransition && d.Transition.To == workqueue.QueueRetry {
-			if d.Transition.RetryAfter.IsZero() {
-				t.Fatal("临时绑定拒绝缺少退避时间")
-			}
 			if err := b.Apply(context.Background(), d); err != nil {
 				t.Fatal(err)
+			}
+			if state := d.Transition.Unit.State(); state.RetryAfter == nil {
+				t.Fatal("临时绑定拒绝缺少退避时间")
 			}
 			return
 		}
@@ -276,6 +278,28 @@ func TestBindingUnknownReleasesAfterMatchingObservation(t *testing.T) {
 	snapshot := resources.Snapshot()
 	if snapshot.Nodes["node-a"].GetRequested().GetMilliCPU() != 1000 || len(snapshot.BoundPods) != 1 {
 		t.Fatal("Release 清理了已确认绑定的占用或重复计账")
+	}
+}
+
+// 这些测试手动推进 Evaluate。生产路径由 RunQueueChecks 在到期后再次评估。
+func applyAfterRetryDeadline(t *testing.T, ctx context.Context, b *buffer.Buffer, queues *workqueue.WorkQueue, unit workqueue.Unit) {
+	t.Helper()
+	if unit.State().Queue == workqueue.QueueActive {
+		return // 第一次手动评估时退避已经到期。
+	}
+	retry, ok := queues.Retry.Get(unit.Key())
+	if !ok || retry.Plan.NotBefore.IsZero() {
+		t.Fatal("资源变化应先记住，Unit 应留在 Retry 等待退避")
+	}
+	timer := time.NewTimer(time.Until(retry.Plan.NotBefore))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := b.Apply(ctx, executionDecision(t, b, unit)); err != nil {
+		t.Fatal(err)
 	}
 }
 

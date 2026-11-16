@@ -55,7 +55,7 @@ func (condition RetryCondition) Matches(changed RetryCondition) bool {
 }
 
 // RetryPlan 记录 Retry → Active 的门槛；事件监听和定时器由外部入口负责。
-//   - 事件型：相关变化提示本单元值得再试，并且 NotBefore（如有）已到。
+//   - 事件型：相关变化提示本单元值得再试，并且退避时间已到。
 //   - 时间型：NotBefore 必填，到期后可以再次尝试。
 //
 // 激活前都须重查组/Pod UID、删除状态、单元归属，以及没有新的绑定中/未知结果。
@@ -63,6 +63,16 @@ func (condition RetryCondition) Matches(changed RetryCondition) bool {
 type RetryPlan struct {
 	Condition RetryCondition
 	NotBefore time.Time
+}
+
+// retryDeadline 从第一次失败开始等 1 秒，后续翻倍，最多 10 秒。
+func retryDeadline(now time.Time, failures int) time.Time {
+	delay := time.Second
+	const maxDelay = 10 * time.Second
+	for i := 1; i < failures && delay < maxDelay; i++ {
+		delay = min(delay*2, maxDelay)
+	}
+	return now.Add(delay)
 }
 
 // PlanRetry 根据失败原因生成等待条件。传入零时间时，只接受等待集群变化的错误。

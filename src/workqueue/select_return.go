@@ -70,26 +70,32 @@ func (w *WorkQueue) selectReturn(request ReturnRequest) error {
 	if err != nil {
 		return err
 	}
+	failedAttempts := 0
 	for _, ref := range request.Members {
 		if err := next.AddMember(ref); err != nil {
 			return err
 		}
+		failedAttempts = max(failedAttempts, record.pods[ref.UID].FailedAttempts+1)
+	}
+	if decision.To == QueueRetry {
+		decision.RetryPlan.NotBefore = retryDeadline(time.Now(), failedAttempts)
 	}
 	if err := prepareEnqueue(next, decision); err != nil {
 		return err
 	}
 
-	// 到这里已经没有会返回错误的步骤。登记新关联，并把新任务放进 Fail。
+	// 先换回送成员的归属并累计失败次数，再清理仍指向旧 Unit 的成员。
 	// 普通 Select 同时使用 selectMu，不能趁成员换轮次的间隙重复组装。
+	for _, ref := range request.Members {
+		failure := *request.Failure
+		record.pods[ref.UID] = &group.PodState{UnitID: next.Key().ID, Phase: group.PodUnscheduled,
+			LastFailure: &failure, FailedAttempts: record.pods[ref.UID].FailedAttempts + 1}
+	}
 	if !request.KeepPrevious {
 		removeUnit(record, old)
 	}
 	record.units[next.Key().ID] = next
 	record.group.UnitIDs[next.Key().ID] = struct{}{}
-	for _, ref := range next.Members() {
-		failure := *request.Failure
-		record.pods[ref.UID] = &group.PodState{UnitID: next.Key().ID, Phase: group.PodUnscheduled, LastFailure: &failure}
-	}
 	w.publishUnit(next, decision)
 	return nil
 }

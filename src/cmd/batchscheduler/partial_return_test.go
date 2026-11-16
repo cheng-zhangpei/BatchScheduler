@@ -145,6 +145,7 @@ func TestPartialReturnKeepsOriginalExecutionAndBatchesWaitingMembers(t *testing.
 	if err := b.Apply(ctx, move); err != nil {
 		t.Fatal(err)
 	}
+	applyAfterRetryDeadline(t, ctx, b, w, next)
 	ready, err := w.Active.Pop(ctx)
 	if err != nil || ready.Key() != next.Key() {
 		t.Fatalf("没有取到 C、D 的重试单元: %v", err)

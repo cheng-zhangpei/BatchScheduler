@@ -41,6 +41,7 @@ func TestTransitionFailToRetryClassification(t *testing.T) {
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			w, unit := failedUnit(t, tc.reason, AllTogether)
+			before := time.Now()
 			err := w.Transition(TransitionRequest{Unit: unit, From: QueueFail, To: QueueRetry,
 				RecoveryComplete: true, RetryAfter: tc.deadline})
 			if err != nil {
@@ -50,17 +51,21 @@ func TestTransitionFailToRetryClassification(t *testing.T) {
 				t.Fatal("Fail 未移除")
 			}
 			retry, exists := w.Retry.Get(unit.Key())
-			if !exists || retry.Unit != unit || retry.Plan.Condition != tc.condition || !retry.Plan.NotBefore.Equal(tc.deadline) {
+			deadline := tc.deadline
+			if deadline.IsZero() {
+				deadline = retry.Plan.NotBefore
+				if deadline.Before(before.Add(time.Second)) || deadline.After(time.Now().Add(time.Second)) {
+					t.Fatalf("首次重试应退避一秒: %v", deadline)
+				}
+			}
+			if !exists || retry.Unit != unit || retry.Plan.Condition != tc.condition || !retry.Plan.NotBefore.Equal(deadline) {
 				t.Fatalf("重试计划不匹配: %+v", retry)
 			}
 			state := unit.State()
 			if state.Queue != QueueRetry || state.Phase != UnitQueued || state.LastFailure.Reason != tc.reason {
 				t.Fatalf("状态未同步或失败记录丢失: %+v", state)
 			}
-			if (state.RetryAfter == nil) != tc.deadline.IsZero() {
-				t.Fatal("退避时间未同步")
-			}
-			if state.RetryAfter != nil && !state.RetryAfter.Equal(tc.deadline) {
+			if state.RetryAfter == nil || !state.RetryAfter.Equal(deadline) {
 				t.Fatal("退避时间错误")
 			}
 			if len(unit.Members()) != 2 || !unit.Frozen() {
@@ -73,11 +78,11 @@ func TestTransitionFailToRetryClassification(t *testing.T) {
 
 func TestTransitionRejectsUnsafeRetriesWithoutMutation(t *testing.T) {
 	for _, reason := range []string{ReasonBindingUnknown, ReasonInvalidSpec, ReasonForbidden,
-		ReasonObjectDeleted, ReasonRecoveryPending, "UnclassifiedError", ReasonTransientSchedulingError, ReasonBindingRejected} {
+		ReasonObjectDeleted, ReasonRecoveryPending, "UnclassifiedError"} {
 		t.Run(reason, func(t *testing.T) {
 			w, unit := failedUnit(t, reason, AllowPartial)
 			if err := w.Transition(TransitionRequest{Unit: unit, From: QueueFail, To: QueueRetry, RecoveryComplete: true}); err == nil {
-				t.Fatal("非自动重试类型或缺少退避时间应被拒绝")
+				t.Fatal("非自动重试类型应被拒绝")
 			}
 			if _, ok := w.Fail.Get(unit.Key()); !ok {
 				t.Fatal("拒绝请求却丢失 Fail 条目")

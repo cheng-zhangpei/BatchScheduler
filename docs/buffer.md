@@ -399,14 +399,14 @@ Atomic 的失败范围是整轮；Partial 能定位某个成员失败时用失�
 | NodeUnavailable | 是 | 节点条件变化 |
 | PlacementConstraints | 是 | 放置条件变化 |
 | DependencyNotReady | 是 | 依赖条件变化 |
-| TransientSchedulingError、BindingRejected | 是 | 当前统一退避一秒 |
+| TransientSchedulingError、BindingRejected | 是 | 等退避截止时间 |
 | SchedulingError、Forbidden、InvalidSpec、BindingUnknown、其他未识别错误 | 否 | 暂留 Fail，不自行定时重试 |
 
 Return 分支通过 `SelectRequest.Return.RecoveryComplete=true` 把确认传给 Select，再写入 `Failure.RecoveryComplete`。这个 true 来自 Evaluate 已确认恢复和收尾完成，不是只看某个 Pod 为 Pending。普通首次入 Fail 仍使用 `QueueDecision.RecoveryComplete`。
 
 ### 12.3 Retry 中的任务
 
-时间型要求截止时间到了。事件型要求相关变化发生过；如果同时设了截止时间，还要等时间。
+时间型等退避到期，事件型还要等相关条件变化。默认从 1 秒开始，连续失败后翻倍，最多 10 秒。失败次数按 Pod UID 记录，回送换了 Unit 也继续累计。同一 Unit 有多个成员时，按其中最多的失败次数计算退避。
 
 相关事件先到但时间未到，Transition 会记下 `ChangeObserved=true`，这次不激活。以后时钟再通知评估，时间到了就不用再等第二次事件。
 
