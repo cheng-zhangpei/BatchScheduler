@@ -34,7 +34,7 @@ type Handlers struct {
 	// Handoff 处理整轮结束或部分成员回送。ReturnMembers 只接住指定成员，不结束旧 Unit。
 	// 返回 nil 才表示这些事已做完；普通 error 必须表示完全没做成，才能安全重试。
 	// 如果不知道做成没有，返回 ErrHandoffUnknown，等查清后再调用 ConfirmHandoff。
-	// Release 接到 WorkQueue.ReleaseUnit；Return/ReturnMembers 接到 Select，后者保留旧 Unit。
+	// Release 无须再清队列；Return/ReturnMembers 把原 Unit 和回送成员直接交给 Select。
 	Handoff func(context.Context, Handoff) error
 }
 

@@ -12,11 +12,11 @@ func TestRetryBackoffGrowsAcrossReturnedUnits(t *testing.T) {
 	w := queueFor(view)
 	selectOK(t, w, SelectRequest{View: view})
 	for _, seconds := range []time.Duration{1, 2, 4, 8, 10, 10} {
-		old := drainActive(t, w, 1)[0]
-		if err := old.MarkProcessing(); err != nil {
-			t.Fatal(err)
+		old := takeActive(t, w)
+		if len(w.groups) != 0 {
+			t.Fatal("执行中的 Unit 不应留在队列目录里")
 		}
-		selectOK(t, w, SelectRequest{Return: &ReturnRequest{Previous: old.Key(), Members: old.Members(),
+		selectOK(t, w, SelectRequest{Return: &ReturnRequest{Source: old, Members: old.Members(),
 			Failure: &group.FailureInfo{Reason: ReasonInsufficientResources}, RecoveryComplete: true}})
 		next := w.GroupSnapshot(old.Key().Group)[0].Unit
 		if next.Key() == old.Key() {
@@ -50,22 +50,19 @@ func TestSelectReturnKeepsPreviousThenEndsOnlyItsRemainingMembers(t *testing.T) 
 	view := testView("work", "partial-return", AllowPartial, 4, 4)
 	w := queueFor(view)
 	selectOK(t, w, SelectRequest{View: view})
-	old := drainActive(t, w, 1)[0]
-	if err := old.MarkProcessing(); err != nil {
-		t.Fatal(err)
-	}
+	old := takeActive(t, w)
 	refs := old.Members()
-	partial := &ReturnRequest{Previous: old.Key(), Members: refs[2:], KeepPrevious: true,
+	partial := &ReturnRequest{Source: old, Members: refs[2:], KeepPrevious: true,
 		Failure: &group.FailureInfo{Reason: ReasonInsufficientResources}, RecoveryComplete: true}
 	selectOK(t, w, SelectRequest{Return: partial})
-	if w.groups[old.Key().Group].units[old.Key().ID] != old || len(old.Members()) != 4 {
-		t.Fatal("部分回送没有保留旧 Unit 和冻结名单")
+	if w.groups[old.Key().Group].units[old.Key().ID] != nil || len(old.Members()) != 4 {
+		t.Fatal("队列不应保存旧 Unit，也不能修改 Buffer 正在用的名单")
 	}
 	if err := w.Select(SelectRequest{Return: partial}); err == nil || len(w.GroupSnapshot(old.Key().Group)) != 1 {
 		t.Fatal("重复交回同一批成员产生了额外任务")
 	}
 	// C、D 已由新 Unit 等待；若 A、B 后来也失败，整轮回送只能处理旧轮次剩下的 A、B。
-	selectOK(t, w, SelectRequest{Return: &ReturnRequest{Previous: old.Key(), Members: refs[:2],
+	selectOK(t, w, SelectRequest{Return: &ReturnRequest{Source: old, Members: refs[:2],
 		Failure: &group.FailureInfo{Reason: ReasonUnschedulable}, RecoveryComplete: true}})
 	queued := w.GroupSnapshot(old.Key().Group)
 	if len(queued) != 2 || w.groups[old.Key().Group].units[old.Key().ID] != nil {
@@ -89,16 +86,18 @@ func TestSelectReturnBatchesPartialMembersAndPreservesOtherUnits(t *testing.T) {
 	first.Members = view.Members[:3]
 	w := queueFor(view)
 	selectOK(t, w, SelectRequest{View: &first})
-	old := drainActive(t, w, 1)[0]
-	if err := old.MarkProcessing(); err != nil {
-		t.Fatal(err)
+	old := takeActive(t, w)
+	held := testStagingSet{}
+	for _, ref := range old.Members() {
+		held[ref.UID] = true
 	}
+	w.Staging = held
 	selectOK(t, w, SelectRequest{View: view})
 	other := drainActive(t, w, 1)[0]
 	// 两个失败成员一起回送；第三个已经绑定，不再调度。
 	view.Members[2].Pod.Spec.NodeName = "node-a"
 	w.Staging = testStaging{key: old.Key().Group, uid: old.Members()[0].UID}
-	request := SelectRequest{Return: &ReturnRequest{Previous: old.Key(), Members: old.Members()[:2],
+	request := SelectRequest{Return: &ReturnRequest{Source: old, Members: old.Members()[:2],
 		Failure: &group.FailureInfo{Reason: ReasonInsufficientResources, Message: "cpu"}, RecoveryComplete: true}}
 	selectOK(t, w, request)
 	queued := w.GroupSnapshot(old.Key().Group)
@@ -136,13 +135,13 @@ func TestSelectReturnRejectsInvalidRequestsWithoutChangingQueues(t *testing.T) {
 			view := testView("work", name, mode, 2, 2)
 			w := queueFor(view)
 			selectOK(t, w, SelectRequest{View: view})
-			old := drainActive(t, w, 1)[0]
-			if name != "queued" {
-				if err := old.MarkProcessing(); err != nil {
-					t.Fatal(err)
-				}
+			var old Unit
+			if name == "queued" {
+				old = drainActive(t, w, 1)[0]
+			} else {
+				old = takeActive(t, w)
 			}
-			request := &ReturnRequest{Previous: old.Key(), Members: old.Members(),
+			request := &ReturnRequest{Source: old, Members: old.Members(),
 				Failure: &group.FailureInfo{Reason: ReasonInsufficientResources}, RecoveryComplete: true}
 			switch name {
 			case "atomic-subset":
@@ -169,13 +168,11 @@ func TestSelectReturnRejectsInvalidRequestsWithoutChangingQueues(t *testing.T) {
 				t.Fatal("无效回送应被拒绝")
 			}
 			record := w.groups[old.Key().Group]
-			if len(record.units) != 1 || record.units[old.Key().ID] != old || len(w.GroupSnapshot(old.Key().Group)) != 0 || old.State().Revision != before.Revision {
+			if len(w.GroupSnapshot(old.Key().Group)) != 0 || old.State().Revision != before.Revision || (name != "queued" && record != nil) {
 				t.Fatal("失败请求修改了旧轮次或实际队列")
 			}
-			for _, ref := range old.Members() {
-				if record.pods[ref.UID].UnitID != old.Key().ID {
-					t.Fatal("失败请求修改了成员关联")
-				}
+			if name == "queued" && (len(record.units) != 1 || record.units[old.Key().ID] != old) {
+				t.Fatal("失败请求修改了待调度关联")
 			}
 		})
 	}

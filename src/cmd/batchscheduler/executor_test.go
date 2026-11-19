@@ -34,14 +34,20 @@ func executorFixture(t *testing.T, configs ...execution.Config) (*buffer.Buffer,
 	b, w, executor, view, resources := queuedExecutorFixture(t, configs...)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	u, err := w.Active.Pop(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Accept(ctx, u); err != nil {
-		t.Fatal(err)
-	}
+	u := acceptQueuedUnit(t, ctx, w, b)
 	return b, u, executor, view, resources
+}
+
+func acceptQueuedUnit(t *testing.T, ctx context.Context, w *workqueue.WorkQueue, b *buffer.Buffer) workqueue.Unit {
+	t.Helper()
+	var received workqueue.Unit
+	if err := w.DispatchActive(ctx, func(ctx context.Context, unit workqueue.Unit) error {
+		received = unit
+		return b.Accept(ctx, unit)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return received
 }
 
 // queuedExecutorFixture 保留入队后的任务，供测试真实 Active 消费循环，不手动 Pop/Accept。

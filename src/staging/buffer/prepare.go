@@ -29,6 +29,7 @@ func (b *Buffer) prepareDecision(ctx context.Context, d staging.Decision) error 
 		return err
 	}
 	// 当前实现每次都重评，比较保守；还没有优化成“观察没变化就跳过”。
+	// todo(cheng) 是否要做的那么保守？
 	current, err := b.Evaluate(ctx, d.Group)
 	if err != nil {
 		return err

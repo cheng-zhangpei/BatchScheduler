@@ -29,7 +29,7 @@ func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 					t.Fatal("回送前 Buffer 提前删记录")
 				}
 				return w.Select(workqueue.SelectRequest{Return: &workqueue.ReturnRequest{
-					Previous: request.Unit.Key(), Members: request.Decision.Members,
+					Source: request.Unit, Members: request.Decision.Members,
 					Failure: request.Decision.Failure, RecoveryComplete: true,
 				}})
 			}
@@ -38,13 +38,7 @@ func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			old, err := w.Active.Pop(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := b.Accept(ctx, old); err != nil {
-				t.Fatal(err)
-			}
+			old := acceptActive(t, ctx, w, b)
 			for _, action := range []staging.Action{staging.ActionExecute, staging.ActionReturn} {
 				d := decisionFor(t, b, old.Key())
 				if d.Action != action {
@@ -89,12 +83,9 @@ func TestReturnHandoffWithRealSelectAndTransitions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			active, err := w.Active.Pop(ctx)
-			if err != nil || active != next {
-				t.Fatalf("没有取到下一轮任务: %v", err)
-			}
-			if err := b.Accept(ctx, active); err != nil {
-				t.Fatal(err)
+			active := acceptActive(t, ctx, w, b)
+			if active != next {
+				t.Fatal("没有取到下一轮任务")
 			}
 			if d := decisionFor(t, b, next.Key()); d.Operation != staging.OperationRun {
 				t.Fatalf("旧失败错误被当成新一轮执行结果: %+v", d)
@@ -113,7 +104,7 @@ func TestPartialReturnRediscoverUnboundHealthyMembers(t *testing.T) {
 	}
 	b.handlers.Handoff = func(_ context.Context, request staging.Handoff) error {
 		return w.Select(workqueue.SelectRequest{Return: &workqueue.ReturnRequest{
-			Previous: request.Unit.Key(), Members: request.Decision.Members,
+			Source: request.Unit, Members: request.Decision.Members,
 			Failure: request.Decision.Failure, RecoveryComplete: true,
 		}})
 	}
@@ -122,13 +113,7 @@ func TestPartialReturnRediscoverUnboundHealthyMembers(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	old, err := w.Active.Pop(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Accept(ctx, old); err != nil {
-		t.Fatal(err)
-	}
+	old := acceptActive(t, ctx, w, b)
 	// 两个 Pod 都未绑定，只有第一个观察到调度失败。
 	view.Members[0].Pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled,
 		Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable}}

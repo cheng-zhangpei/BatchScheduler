@@ -116,7 +116,7 @@ func TestAcceptRejectsConflictsWithoutPartialWrites(t *testing.T) {
 }
 
 func TestAcceptValidatesCurrentFacts(t *testing.T) {
-	for _, kind := range []string{"atomic-incomplete", "mode-mismatch", "group-recreated", "group-deleting", "pod-recreated", "bound", "terminal", "wrong-owner", "unfrozen", "retry-source", "cancelled"} {
+	for _, kind := range []string{"mode-mismatch", "group-recreated", "group-deleting", "pod-recreated", "bound", "terminal", "wrong-owner", "unfrozen", "retry-source", "cancelled"} {
 		t.Run(kind, func(t *testing.T) {
 			mode := workqueue.AllowPartial
 			if kind == "atomic-incomplete" {

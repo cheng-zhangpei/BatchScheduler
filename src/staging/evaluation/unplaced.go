@@ -29,6 +29,8 @@ func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup
 		// Recovering/Recovered 阶段则是在处理整轮失败，交给原来的恢复、回送流程。
 		return d, false
 	}
+	// 这后面的一大堆是集群的真实情况，这些真实情况决定的是，上一轮的binding是否已经成功丢出去了，
+	// 如果没有丢出去其实我们还不知道unplaced里面要怎么设计
 	if r.Observed == nil {
 		// Observe 还没为这份 Record 填入集群观察，暂时不知道原组和这些 Pod 当前是否还在。
 		return d, false
@@ -69,7 +71,7 @@ func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup
 		return d, false
 	}
 
-	// 2. 使用同一个错误引擎入口。这里的“收尾完成”只指这些未放置成员，不是整轮。
+	// 2. 使用同一个错误引擎入口。这个错误引擎会做出统一的decision（这是针对一种类型的错误 ）
 	result, ok := errorengine.Decide(errorengine.Input{
 		Failure: failure, Members: members, RecoveryComplete: true, ResponsibilitiesSettled: true,
 	})

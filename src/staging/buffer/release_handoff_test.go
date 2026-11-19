@@ -18,10 +18,7 @@ func TestReleaseHandoffWithRealWorkQueue(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	u, err := w.Active.Pop(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	u := acceptActive(t, ctx, w, b)
 	b.handlers.Execute = simulatedExecutor(b, view, false)
 	b.handlers.Handoff = func(_ context.Context, request staging.Handoff) error {
 		if request.Decision.Action != staging.ActionRelease {
@@ -30,10 +27,7 @@ func TestReleaseHandoffWithRealWorkQueue(t *testing.T) {
 		if !b.ContainsPod(u.Key().Group, u.Members()[0].UID) {
 			t.Fatal("队列处理前 Buffer 已提前删记录")
 		}
-		return w.ReleaseUnit(request.Unit.Key())
-	}
-	if err := b.Accept(ctx, u); err != nil {
-		t.Fatal(err)
+		return nil // 队列关联在 DispatchActive 时已移除，Release 只结束 Buffer 记录。
 	}
 	for _, op := range []staging.Operation{staging.OperationRun, ""} {
 		d := decisionFor(t, b, u.Key())
@@ -47,4 +41,16 @@ func TestReleaseHandoffWithRealWorkQueue(t *testing.T) {
 	if len(b.records) != 0 || len(b.groups) != 0 || len(b.owners) != 0 || u.State().Phase != workqueue.UnitDone {
 		t.Fatal("真实队列清理后，Buffer 没有完成本轮清理")
 	}
+}
+
+func acceptActive(t *testing.T, ctx context.Context, w *workqueue.WorkQueue, b *Buffer) workqueue.Unit {
+	t.Helper()
+	var received workqueue.Unit
+	if err := w.DispatchActive(ctx, func(ctx context.Context, unit workqueue.Unit) error {
+		received = unit
+		return b.Accept(ctx, unit)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return received
 }

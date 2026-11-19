@@ -49,10 +49,10 @@ type RetryQueue interface {
 }
 
 // WorkQueue 组织三个基础队列和一个快速重试通道。
-// 跨队列流转、单元互斥及消费顺序尚未实现。
+// 这里只保留待调度任务；交给 Buffer 后，不再保留执行中的 Unit 及成员关联。
 // 调用方应通过 Transition 请求队列间迁移，不自行拼接 Remove 和 Add/Put。
 // 首次入队由 Select 直接分发到目标队列。
-// 当前字段仍公开供学习查看；实现迁移时再收紧写入边界。
+// ActiveQueue.Pop 只操作 FIFO；运行时应使用 DispatchActive 完成与 Buffer 的交接。
 type WorkQueue struct {
 	// selectMu 暂时串行保护组装和归属登记，后续再考虑按组拆分锁。
 	selectMu sync.Mutex

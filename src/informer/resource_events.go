@@ -22,6 +22,7 @@ type ResourceObserver interface {
 func (i *Informers) OnResourceChange(resources ResourceObserver) error {
 	notifyNodeChange := func() {
 		if i.notifyRetry != nil {
+			// 这里通知的是buffer，因为按照我们的架构buffer是核心的决策中心
 			i.notifyRetry(workqueue.RetryOnResources)
 			i.notifyRetry(workqueue.RetryOnNodes)
 			i.notifyRetry(workqueue.RetryOnPlacement)

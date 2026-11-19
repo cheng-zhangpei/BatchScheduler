@@ -71,13 +71,7 @@ func TestPartialReturnKeepsOriginalExecutionAndBatchesWaitingMembers(t *testing.
 	if err := w.Select(workqueue.SelectRequest{View: view}); err != nil {
 		t.Fatal(err)
 	}
-	old, err := w.Active.Pop(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Accept(ctx, old); err != nil {
-		t.Fatal(err)
-	}
+	old := acceptQueuedUnit(t, ctx, w, b)
 	if err := b.Apply(ctx, executionDecision(t, b, old)); err != nil {
 		t.Fatal(err)
 	}
@@ -146,12 +140,9 @@ func TestPartialReturnKeepsOriginalExecutionAndBatchesWaitingMembers(t *testing.
 		t.Fatal(err)
 	}
 	applyAfterRetryDeadline(t, ctx, b, w, next)
-	ready, err := w.Active.Pop(ctx)
-	if err != nil || ready.Key() != next.Key() {
-		t.Fatalf("没有取到 C、D 的重试单元: %v", err)
-	}
-	if err := b.Accept(ctx, ready); err != nil {
-		t.Fatalf("旧 Record 不应阻挡已交出成员的新轮次: %v", err)
+	ready := acceptQueuedUnit(t, ctx, w, b)
+	if ready.Key() != next.Key() {
+		t.Fatal("没有取到 C、D 的重试单元")
 	}
 	// A、B 独立完成，归档和清理都只处理旧轮次仍负责的成员。
 	for _, member := range view.Members[:2] {

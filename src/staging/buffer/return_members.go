@@ -60,6 +60,7 @@ func (b *Buffer) applyReturnMembers(ctx context.Context, d staging.Decision) err
 		}
 	}
 	// 继续检查其他未放置成员和队列中等待的任务。
+	// todo(cheng): 代价很大，这个重新评估是面向多种不同类型的错误需要反复触发unplaced的。我们这里最好改为条件触发而不是现在这样无条件触发
 	b.evaluations.Add(d.Group)
 	return nil
 }

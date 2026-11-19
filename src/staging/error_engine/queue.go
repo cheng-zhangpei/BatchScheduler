@@ -26,6 +26,8 @@ func decideFailedQueue(input Input) (Decision, bool) {
 		Reason: entry.Failure.Reason, RecoveryComplete: true,
 	}
 	switch entry.Failure.Reason {
+	// 匹配这些错误就会返回一个transition的决定
+	//todo(cheng) 对于这些错误的重试还要细细权衡
 	case workqueue.ReasonUnschedulable, workqueue.ReasonInsufficientResources, workqueue.ReasonNodeUnavailable,
 		workqueue.ReasonPlacementConstraints, workqueue.ReasonDependencyNotReady,
 		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected:
@@ -43,20 +45,23 @@ func decideRetryQueue(input Input) (Decision, bool) {
 	entry := input.Queued
 	wake := workqueue.RetryWake{Now: input.Now}
 	if input.Wake != nil {
+		// wake.Changed表示这次收到的事件。
 		wake.Changed = input.Wake.Changed
 	}
 	plan := entry.Retry.Plan
+	// 只等退避的任务，检查截止时间。没到就返回 false，到了就往下走。
 	if plan.Condition == workqueue.RetryOnBackoff {
 		if plan.NotBefore.IsZero() || input.Now.Before(plan.NotBefore) {
 			return Decision{}, false
 		}
+		// 等资源等事件的任务，检查有没有收到相关变化。之前没收到、这次也没收到，就返回 false。
 	} else if !entry.Retry.ChangeObserved && !plan.Condition.Matches(wake.Changed) {
 		return Decision{}, false
 	}
+	// 相关事件先到、退避还没到时，也通知 Transition 把“变化发生过”记下来。
 	if input.Now.Before(plan.NotBefore) && wake.Changed == "" {
 		return Decision{}, false
 	}
-	// 相关事件先到、退避还没到时，也通知 Transition 把“变化发生过”记下来。
 	// 它这次不会搬任务；以后时间到了，就不必再等一次相同事件。
 	request := workqueue.TransitionRequest{Unit: entry.Unit, ExpectedRevision: entry.State.Revision,
 		From: workqueue.QueueRetry, To: workqueue.QueueActive, Wake: &wake}

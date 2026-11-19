@@ -16,7 +16,7 @@ func (u *schedulingUnit) Definition() *group.Definition {
 func (u *schedulingUnit) SetDefinition(definition *group.Definition) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.state.Phase != UnitNew {
+	if !u.editable() {
 		return fmt.Errorf("%w: 组声明也已冻结", ErrUnitFrozen)
 	}
 	if definition == nil || definition.Spec.Members <= 0 {

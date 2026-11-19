@@ -33,7 +33,6 @@ func (b *Buffer) observe(ctx context.Context, observation staging.Observation, n
 		return fmt.Errorf("Observe 缺少组视图读取器")
 	}
 	b.observeMu.Lock()
-	// 这把锁覆盖“读取缓存 → 写回观察”的整个过程。
 	// 否则两次读取可能倒着写回：后读的新状态先写，先读的旧状态后写。
 	defer b.observeMu.Unlock()
 	// 事件里可能带着旧 Pod；这里只用组编号，实际信息重新向 Store 查询。
@@ -44,10 +43,12 @@ func (b *Buffer) observe(ctx context.Context, observation staging.Observation, n
 	if err != nil {
 		view = nil // NotFound 是资源变化，不是“调度失败”。
 	}
-	exists := view != nil && view.Group != nil && (group.Key{Namespace: view.Group.Namespace, Name: view.Group.Name, UID: view.Group.UID}) == key
+	exists := view != nil && view.Group != nil &&
+		(group.Key{Namespace: view.Group.Namespace, Name: view.Group.Name, UID: view.Group.UID}) == key
 	current := make(map[workqueue.PodRef]group.PodView)
 	if exists {
 		for _, member := range view.Members {
+			// 外部传入的观测组，和我自己buffer中的值不匹配
 			if member.Pod == nil || member.Group != key {
 				return fmt.Errorf("Observe 收到无效成员视图")
 			}
@@ -79,14 +80,13 @@ func (b *Buffer) observe(ctx context.Context, observation staging.Observation, n
 			}
 			facts.Members[ref] = fact
 		}
-		// 只替换 Observed：旧观察可以丢弃，不保留每次变化的历史。
-		// Members 里的执行进度和 owners 里的处理关系都不在这里改。
+		// 所以核心就是这里，他将informer内部的cache落到了buffer的缓冲区里面
 		if !reflect.DeepEqual(record.Observed, facts) {
 			record.Observed = facts
 			record.Revision++
 		}
 	}
-	// 放的是 Group Key，意思是“稍后检查这个组”；不是把 Pod/Unit 再入队一次。
+	// informer调用才需要进evaluate，如果是evaluate进来就不要再重新评估不然死循环了。
 	if notify {
 		b.evaluations.Add(key)
 	}

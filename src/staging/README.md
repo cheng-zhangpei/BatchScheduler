@@ -30,3 +30,5 @@ Apply 只提交一次 Run。`scheduler/executor/` 自己组织 Filter → Pod Sc
 详细说明见 [Buffer 源码阅读说明](../../docs/buffer.md)。
 
 跨 Unit 查询和归档的完整说明见 [组上下文与成功记录](../../docs/group-context.md)。
+
+Active 出队、Atomic 分批汇集、失败回送的当前边界见 [WorkQueue 与 Buffer 的交接](../../docs/queue-buffer-ownership.md)。执行中的 Unit 不再保留在队列目录中。

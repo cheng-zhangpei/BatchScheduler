@@ -10,7 +10,6 @@ import (
 )
 
 // beginAction 给 Record 写上“action-N 这件事正在做”，并准备好交给外部的参数。
-// 检查旧版本和登记 Pending 放在同一段受保护的代码里，防止两个调用都启动操作。
 func (b *Buffer) beginAction(d staging.Decision) (staging.Execution, staging.Handoff, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -22,16 +21,18 @@ func (b *Buffer) beginAction(d staging.Decision) (staging.Execution, staging.Han
 		return staging.Execution{}, staging.Handoff{}, staging.ErrStaleDecision
 	}
 	if r.PendingAction != "" {
+		// 核对这份r没有被改变
 		ref, confirmed := evaluation.ObservedBindingSuccess(r)
 		if d.Action != staging.ActionRelease || !confirmed {
 			return staging.Execution{}, staging.Handoff{}, staging.ErrStaleDecision
 		}
-		// 同一个 Pod 已绑定，先结清旧执行，再登记下方的 Release，归档时就能读到成功状态。
+		// 这里是将现在调度记录内的record记录为绑定状态
 		state := r.Members[ref]
 		state.Phase = group.PodBound
 		r.Members[ref] = state
 		r.ExecutionPhase, r.Failure, r.ResponsibilitiesSettled = staging.PhaseBound, nil, true
 	}
+	// 更新这一轮的动作
 	b.nextAction++
 	id := fmt.Sprintf("action-%d", b.nextAction)
 	r.PendingAction, r.PendingOperation, r.PendingDecision = id, d.Operation, d.Action

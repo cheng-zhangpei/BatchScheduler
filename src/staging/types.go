@@ -99,7 +99,8 @@ type Decision struct {
 // 它由 Accept 创建，本轮结束后删除，不保存 Group 的完整历史。
 // PendingAction 为空只说明当前没在等某个操作，不代表已经完成所有收尾。
 type Record struct {
-	ID               string // 本轮 Record 的唯一编号，成功归档时沿用，避免重启后的 Unit 编号重复。
+	AcceptedUnits    map[workqueue.UnitKey][]workqueue.PodRef // Atomic 汇集前各批次的原始名单，只用于认出重复 Accept。
+	ID               string                                   // 本轮 Record 的唯一编号，成功归档时沿用，避免重启后的 Unit 编号重复。
 	Unit             workqueue.Unit
 	Members          map[workqueue.PodRef]group.PodState
 	ReturnedMembers  map[workqueue.PodRef]bool // 已交给新 Unit 的成员；原 Unit 的冻结名单仍保留。

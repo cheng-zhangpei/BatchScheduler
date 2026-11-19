@@ -54,13 +54,17 @@ func NewBuffer(views workqueue.GroupViewReader, history staging.SuccessHistory, 
 }
 
 // Accept 给已经出队的 Unit 建执行记录，记下“这些 Pod 现在由它处理”。
-// 不计算节点、不合并 Unit。调用者必须先 Pop；当前代码还不能证明它真的出过队。
+// 不计算节点。Atomic 的分批成员在这里汇集，凑齐后由 Evaluate 启动一次执行。
 func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if unit == nil {
 		return fmt.Errorf("Accept 缺少 Unit")
+	}
+	// 正常由 DispatchActive 在出队时固定成员；直接调用 Accept 时也先固定再读取。
+	if err := unit.Freeze(); err != nil {
+		return err
 	}
 	key, mode, members := unit.Key(), unit.Mode(), unit.Members()
 	// 需要完整编号才能认出重复任务；成员必须固定，否则 owners 会记错由谁处理。
@@ -89,8 +93,8 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 		return err
 	}
 	state := unit.State()
-	// Fail/Retry 尚未获准执行；不能绕过 Transition 直接塞入缓冲区。
-	if state.Phase != workqueue.UnitQueued || (state.Queue != workqueue.QueueActive && state.Queue != workqueue.QueueFastRetry) {
+	// 接收到除了active之外的其他队列状态的Unit
+	if (state.Phase != workqueue.UnitQueued && state.Phase != workqueue.UnitFrozen) || (state.Queue != workqueue.QueueActive && state.Queue != workqueue.QueueFastRetry) {
 		// 另一个 Accept 可能刚接收了它并改成 Processing，再查一次确认是否只是重复。
 		b.mu.RLock()
 		exists, err := b.checkDuplicate(key, mode, refs)
@@ -109,6 +113,8 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err != nil {
 		return fmt.Errorf("Accept 读取组视图: %w", err)
 	}
+	// 这个地方验证的事情是，我现在组的数据已经在buffer中，这个unit可能是有组归属的，但是这个时候这个unit又和buffer内组的信息冲突了
+	// 这个地方冲突的往往是已经硬编码的东西，比如group已经应用的模式
 	if err := validateAdmission(view, key.Group, mode, refs); err != nil {
 		return err
 	}
@@ -123,9 +129,18 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	// 刚才读缓存时，另一个 Accept 也可能接收了同一 Unit，所以在写入前再查一次。
+	// todo(cheng) 此处的幂等检查，其实暂时是没有意义的。因为前面的runActive是原子的，这里基本不会出现duplicate的情况
 	if exists, err := b.checkDuplicate(key, mode, refs); exists || err != nil {
 		return err
+	}
+
+	// 同组 Atomic 尚未启动时接住后到的成员；已经启动后不再改执行名单。
+	if mode == workqueue.AllTogether {
+		if merged, err := b.acceptAtomicMembers(unit, definition); merged || err != nil {
+			return err
+		}
 	}
 	for otherKey := range b.groups[key.Group] {
 		other := b.records[otherKey]
@@ -143,24 +158,33 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 			}
 		}
 	}
+
 	for _, ref := range members {
 		if owner, ok := b.owners[key.Group][ref.UID]; ok {
 			return fmt.Errorf("成员 %s 仍由单元 %s 持有", ref.Name, owner.ID)
 		}
 	}
 
-	// 前面只检查。从这里开始一起登记进度、组内编号和 Pod 处理关系。
-	record := &staging.Record{ID: string(uuid.NewUUID()), Unit: unit, Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1, Generation: definition.Generation}
+	// 建立record，此时每一个unit的record是相互独立的
+	record := &staging.Record{ID: string(uuid.NewUUID()), Unit: unit,
+		Members: make(map[workqueue.PodRef]group.PodState, len(members)), Revision: 1,
+		Generation: definition.Generation}
+	if mode == workqueue.AllTogether {
+		record.AcceptedUnits = map[workqueue.UnitKey][]workqueue.PodRef{key: members}
+	}
 	// 把 Unit 标为正在处理；它是否真的从队列取出，仍由调用者保证。
 	if err := unit.MarkProcessing(); err != nil {
 		return err
 	}
+
+	// 如果是第一次进入workqueue需要建立group的映射和owner的映射
 	if b.groups[key.Group] == nil {
 		b.groups[key.Group] = make(map[workqueue.UnitKey]struct{})
 		b.owners[key.Group] = make(map[types.UID]workqueue.UnitKey)
 	}
+
 	for _, ref := range members {
-		record.Members[ref] = group.PodState{Phase: group.PodUnscheduled, UnitID: key.ID}
+		record.Members[ref] = group.PodState{Phase: group.PodUnscheduled, UnitID: key.ID, FailedAttempts: state.FailedAttempts[ref.UID]}
 		b.owners[key.Group][ref.UID] = key
 	}
 	b.records[key] = record
@@ -175,7 +199,17 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 func (b *Buffer) checkDuplicate(key workqueue.UnitKey, mode workqueue.SubmitMode, refs map[workqueue.PodRef]bool) (bool, error) {
 	record, ok := b.records[key]
 	if !ok {
+		// 后到的 Atomic Unit 已汇入本组的主 Record，原编号仍用于认出重复交接。
+		for recordKey := range b.groups[key.Group] {
+			candidate := b.records[recordKey]
+			if accepted, exists := candidate.AcceptedUnits[key]; exists {
+				return compareAcceptedUnit(candidate.Unit.Mode(), mode, accepted, refs)
+			}
+		}
 		return false, nil
+	}
+	if accepted, exists := record.AcceptedUnits[key]; exists {
+		return compareAcceptedUnit(record.Unit.Mode(), mode, accepted, refs)
 	}
 	if record.Unit.Mode() != mode || len(record.Members) != len(refs) {
 		return true, fmt.Errorf("UnitKey 重用但模式或成员不同: %s", key.ID)
@@ -188,7 +222,7 @@ func (b *Buffer) checkDuplicate(key workqueue.UnitKey, mode workqueue.SubmitMode
 	return true, nil
 }
 
-// validateAdmission 检查“这个 Unit 排队之后，原来的组和成员还允许继续执行吗”。
+// validateAdmission 检查这个 Unit 排队之后，原来的组和成员还允许继续执行吗。
 func validateAdmission(view *group.View, key group.Key, mode workqueue.SubmitMode, refs map[workqueue.PodRef]bool) error {
 	// 名称相同但 UID 换了就是另一个组；正在删除的组也不能接新任务。
 	if view == nil || view.Group == nil || view.Group.Namespace != key.Namespace || view.Group.Name != key.Name || view.Group.UID != key.UID || view.Group.DeletionTimestamp != nil {
@@ -202,8 +236,8 @@ func validateAdmission(view *group.View, key group.Key, mode workqueue.SubmitMod
 	if declared != mode || view.Group.Spec.Members <= 0 {
 		return fmt.Errorf("Accept 单元模式与组声明不符，或组成员数无效")
 	}
-	if mode == workqueue.AllTogether && (len(refs) != int(view.Group.Spec.Members) || len(view.Members) != len(refs)) {
-		return fmt.Errorf("Atomic 单元必须覆盖当前声明的完整组成员")
+	if mode == workqueue.AllTogether && len(refs) > int(view.Group.Spec.Members) {
+		return fmt.Errorf("Atomic 成员超过组声明数量")
 	}
 	found := make(map[workqueue.PodRef]bool, len(refs))
 	for _, member := range view.Members {

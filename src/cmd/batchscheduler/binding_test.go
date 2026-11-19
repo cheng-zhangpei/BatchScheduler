@@ -49,13 +49,7 @@ func TestGroupPlanRetriesAfterCapacityIsReleased(t *testing.T) {
 	}
 	startAttempt := func() workqueue.Unit {
 		t.Helper()
-		u, err := queues.Active.Pop(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := b.Accept(ctx, u); err != nil {
-			t.Fatal(err)
-		}
+		u := acceptQueuedUnit(t, ctx, queues, b)
 		if err := b.Apply(ctx, executionDecision(t, b, u)); err != nil {
 			t.Fatal(err)
 		}

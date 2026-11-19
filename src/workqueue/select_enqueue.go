@@ -21,14 +21,16 @@ func (w *WorkQueue) newUnit(key group.Key, mode SubmitMode, definition *group.De
 	return unit, nil
 }
 
-// prepareEnqueue 冻结成员并登记目标队列，还不把 Unit 放进实际队列。
+// prepareEnqueue 登记目标队列。Active 保持可追加，其他队列固定这次等待的成员范围。
 // 失败回送先完成这一步，确定能入队后才替换旧记录，避免处理一半返回错误。
 func prepareEnqueue(unit Unit, decision QueueDecision) error {
 	if !isQueue(decision.To) {
 		return fmt.Errorf("Select 收到未知目标队列: %q", decision.To)
 	}
-	if err := unit.Freeze(); err != nil {
-		return err
+	if decision.To != QueueActive {
+		if err := unit.Freeze(); err != nil {
+			return err
+		}
 	}
 	var failure *group.FailureInfo
 	if decision.Reason != "" || decision.Message != "" {

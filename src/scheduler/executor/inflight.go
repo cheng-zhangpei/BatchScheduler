@@ -23,6 +23,7 @@ func newInflight(config Config) *Inflight {
 // 名额包括正在调度、已经入队等待绑定、正在绑定的轮次。
 func (i *Inflight) Reserve(ctx context.Context) error {
 	select {
+	// 注意一下我们这个slot只是一个逻辑上的占位符，本身上就是说明我们这个slot有数据罢了
 	case i.slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
@@ -32,7 +33,9 @@ func (i *Inflight) Reserve(ctx context.Context) error {
 
 // Submit 把这一轮交给 worker；调用者必须已经 Reserve，之后不再修改这个 Attempt。
 // 每个名额只提交一次，队列容量覆盖所有名额，因此这里无需等待 worker 完成绑定。
-func (i *Inflight) Submit(a *executionAttempt) { i.tasks <- a }
+func (i *Inflight) Submit(a *executionAttempt) {
+	i.tasks <- a
+}
 
 // Release 在调度失败或后台任务结束后，归还容量名额。
 func (i *Inflight) Release() { <-i.slots }

@@ -30,7 +30,8 @@ func (b *Buffer) Evaluate(ctx context.Context, key group.Key) ([]staging.Decisio
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	exists := err == nil && view != nil && view.Group != nil && (group.Key{Namespace: view.Group.Namespace, Name: view.Group.Name, UID: view.Group.UID}) == key
+	exists := err == nil && view != nil && view.Group != nil &&
+		(group.Key{Namespace: view.Group.Namespace, Name: view.Group.Name, UID: view.Group.UID}) == key
 	// 查询 Fail/Retry 时不要先占住 Buffer 的锁：WorkQueue 读到一半可能要调用 ContainsPod，
 	// 而 ContainsPod 也要读 Buffer。如果两边各等对方放开，就都走不下去了。
 	// 这里只读取，不出队。

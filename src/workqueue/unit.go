@@ -3,6 +3,7 @@ package workqueue
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 
 	"batchscheduler/src/group"
@@ -10,7 +11,8 @@ import (
 )
 
 // UnitKey 区分同一组的不同调度单元。当前 ID 使用进程内递增序号，不跨重启持久化。
-// 组装期间追加成员不改变 ID；冻结后若需改变范围或生成新一轮单元，应使用新 ID。
+// 组装及 Active 追加成员不改变 ID；新一轮重试使用新 ID。
+// Atomic 在 Buffer 等待期间汇集成员时沿用主 Record 编号，执行启动后范围固定。
 type UnitKey struct {
 	Group group.Key
 	ID    string
@@ -35,7 +37,7 @@ const (
 var ErrUnitFrozen = errors.New("调度单元已冻结，不能追加成员")
 
 // Unit 是同一组内的弹性 Pod 集合，持有成员和本轮生命周期状态。
-// 组装阶段可追加成员；提交入队前冻结，后续处理和重试都不能改变成员。
+// Active 中仍可追加成员；交给 Buffer 时冻结，本轮执行期间成员固定。
 // 跨单元的 Pod 归属校验和组内登记由 Select 的组装入口处理。
 type Unit interface {
 	Key() UnitKey
@@ -45,6 +47,7 @@ type Unit interface {
 	SetDefinition(*group.Definition) error
 	Members() []PodRef
 	State() UnitState
+	SetFailedAttempts(map[types.UID]int) error
 	Frozen() bool
 	AddMember(PodRef) error
 	RemoveMember(PodRef) error
@@ -87,6 +90,7 @@ func (u *schedulingUnit) State() UnitState {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
 	state := u.state
+	state.FailedAttempts = maps.Clone(state.FailedAttempts)
 	if state.LastFailure != nil {
 		failure := *state.LastFailure
 		state.LastFailure = &failure
@@ -107,15 +111,31 @@ func (u *schedulingUnit) Members() []PodRef {
 func (u *schedulingUnit) Frozen() bool {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	return u.state.Phase != UnitNew
+	return !u.editable()
 }
 
-// AddMember 只允许在组装期间追加；相同引用重复到达时不重复添加。
+// editable 在持有 Unit 锁时调用：只有组装中和 Active 等待中的成员还能调整。
+func (u *schedulingUnit) editable() bool {
+	return u.state.Phase == UnitNew || (u.state.Phase == UnitQueued && u.state.Queue == QueueActive)
+}
+
+// SetFailedAttempts 让重试次数随 Unit 交给 Buffer，不依赖队列保留执行中的旧记录。
+func (u *schedulingUnit) SetFailedAttempts(attempts map[types.UID]int) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.editable() {
+		return ErrUnitFrozen
+	}
+	u.state.FailedAttempts = maps.Clone(attempts)
+	return nil
+}
+
+// AddMember 在组装中或 Active 等待中追加；相同引用重复到达时不重复添加。
 // PodRef 不含 ownerReference，调用方须先确认 Pod 属于本组。
 func (u *schedulingUnit) AddMember(pod PodRef) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.state.Phase != UnitNew {
+	if !u.editable() {
 		return ErrUnitFrozen
 	}
 	if pod.Name == "" || pod.UID == "" {
@@ -133,12 +153,12 @@ func (u *schedulingUnit) AddMember(pod PodRef) error {
 	return nil
 }
 
-// RemoveMember 仅在组装阶段移除精确引用，避免同名新 Pod 误删旧尝试的成员。
+// RemoveMember 在组装中或 Active 等待中移除精确引用。
 // 重复移除安全；冻结后与追加一样被禁止。
 func (u *schedulingUnit) RemoveMember(pod PodRef) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.state.Phase != UnitNew {
+	if !u.editable() {
 		return ErrUnitFrozen
 	}
 	for i, member := range u.members {
@@ -146,37 +166,40 @@ func (u *schedulingUnit) RemoveMember(pod PodRef) error {
 			copy(u.members[i:], u.members[i+1:])
 			u.members[len(u.members)-1] = PodRef{}
 			u.members = u.members[:len(u.members)-1]
+			delete(u.state.FailedAttempts, pod.UID)
 			break
 		}
 	}
 	return nil
 }
 
-// Freeze 将组装中的单元转为冻结状态，重复调用安全，不执行入队。
-// 是否已满足整组/部分提交条件，由调用方在冻结前判断。
+// Freeze 在出队交接时固定成员，重复调用安全。它不判断整组是否已经到齐。
+// Fail/Retry 首次入队前也用它固定等待范围；迁回 Active 后可以继续追加。
 func (u *schedulingUnit) Freeze() error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if len(u.members) == 0 {
 		return fmt.Errorf("不能冻结空调度单元")
 	}
-	if u.state.Phase == UnitNew {
+	if u.editable() {
 		u.state.Phase = UnitFrozen
 		u.state.Revision++
 	}
 	return nil
 }
 
-// MarkQueued 只接受已冻结且从未入队的单元，避免首次入队覆盖已有位置。
-// 调用方必须紧接着发布到对应队列；后续队列间迁移不使用此入口。
+// MarkQueued 登记首次入队，也用于 Accept 失败后恢复原 Active 条目。
+// Active 保持可追加，其他队列的等待范围固定；队列间迁移仍走 Transition。
 func (u *schedulingUnit) MarkQueued(queue QueueName, failure *group.FailureInfo, waitingFor string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if !isQueue(queue) {
 		return fmt.Errorf("无效的入队位置: %q", queue)
 	}
-	if u.state.Phase != UnitFrozen || u.state.Queue != QueueNone {
-		return fmt.Errorf("只有已冻结且尚未入队的单元可以首次入队")
+	newActive := u.state.Phase == UnitNew && queue == QueueActive
+	frozen := u.state.Phase == UnitFrozen && (u.state.Queue == QueueNone || u.state.Queue == queue)
+	if (!newActive && !frozen) || len(u.members) == 0 {
+		return fmt.Errorf("只能登记新单元，或恢复尚未交给 Buffer 的出队单元")
 	}
 	u.state.Revision++
 	u.state.Phase = UnitQueued
@@ -225,7 +248,7 @@ func (u *schedulingUnit) MarkActive() error {
 func (u *schedulingUnit) MarkProcessing() error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.state.Phase != UnitQueued || (u.state.Queue != QueueActive && u.state.Queue != QueueFastRetry) {
+	if (u.state.Phase != UnitQueued && u.state.Phase != UnitFrozen) || (u.state.Queue != QueueActive && u.state.Queue != QueueFastRetry) {
 		return fmt.Errorf("只有 Active/FastRetry 出队单元可以进入处理阶段")
 	}
 	u.state.Revision++

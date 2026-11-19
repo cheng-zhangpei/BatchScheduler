@@ -1,6 +1,6 @@
 # Buffer 源码阅读说明
 
-更新日期：2026-10-25。本文按当前源码说明实际行为；“还没实现”会明确写出来。
+队列交接与 Atomic 汇集更新于 2026-11-18，先读 [WorkQueue 与 Buffer 的交接](queue-buffer-ownership.md)。本文其余章节保留逐函数阅读顺序，部分执行线描述仍来自早期版本。
 
 ## 1. 先记住 Buffer 在做什么
 
@@ -31,13 +31,13 @@ informer：持续读取集群中的组和 Pod，告诉 Buffer 实际发生了什
 | Evaluate 生成 Transition → Apply → WorkQueue.Transition | 已接真实函数，自动路径有测试 |
 | 节点变化、已绑定 Pod 删除、调度门移除 → 重试通知 | 已注册；只是条件可能改善，不保证下次能调度 |
 | 退避时间到 → 再次评估 | main 每秒通知检查 Fail/Retry |
-| Active.Pop → Accept 的主循环 | **尚未实现**；测试中直接调用 |
-| Apply → Execute → Report | 已接独立执行队列、内部 Filter/Pod Score 和持续 Report；组选点和真实资源操作待实现 |
-| 成功结束 → BoltDB 归档 → 解除队列旧关联 → 删除活跃 Record | 已接，写库失败时保留活跃记录；失效清理不写成成功历史 |
+| Active → Buffer 的主循环 | runActive 调用 DispatchActive：固定成员 → Accept → 删除队列关联；失败放回 |
+| Apply → Execute → Report | 已接 Filter、Pod Score、组规划、Assume、异步 Bind、Recover 和持续 Report |
+| 成功结束 → BoltDB 归档 → 删除活跃 Record | 已接，写库失败时保留活跃记录；失效清理不写成成功历史 |
 | 失败恢复后 → 创建下一轮并回队列 | 已接 Handoff 的 Return 分支，通过 SelectRequest.Return 组装新 Unit 并放入 Fail |
 | compaction、FastRetry 准入、容量限制、Pending 超时核查 | **尚未实现** |
 
-所以“模拟执行器可以走完流程”不代表真实集群中已经能完成一次调度。Select、Transition、Handoff 的 Release/Return、Execute 入口及 Report 回报通道已接；具体执行阶段和 Active 消费循环未实现。
+当前主线已经接通；本次进一步把执行中任务从队列目录移走，并把 Atomic 等齐放在 Buffer。测试结果应以当前测试和集群验证记录为准。
 
 ## 3. 源码应该从哪里读
 
@@ -81,9 +81,9 @@ UID 是为了区分“旧 A 被删了，新建了同名 A”。同名不代表�
 
 Unit 放进队列前已经 Freeze。执行期间不能往 U 里追加或删除成员。以后要合并任务、拆出新的重试范围，必须创建新的 Unit。
 
-当前组装方式是 Atomic 等整组到齐，Partial 把当前可接收的同组成员批量装进 Unit，不必等整组到齐，也不限制为一个 Pod。assemble 通过 Buffer.ContainsPod 排除已经在执行的成员，再排除已有队列归属的成员。
+两种模式都先把当前可接收的同组成员装入 Unit 并进入 Active，不在队列等待整组到齐。Atomic 分批进入 Buffer 后汇集，齐全才启动；Partial 可以直接处理当前这批。assemble 通过 Buffer.ContainsPod 排除执行中的成员，再排除已有队列归属的成员。
 
-同组仍可有多个 Partial Unit：旧 Unit 已冻结或进入 Buffer 时，后到成员另成一批，不直接追加到旧 Unit。Pod 事件只是触发检查，不再把本轮候选范围限制为事件对应的一个 Pod。Partial 的区别在于允许部分成功和按失败范围恢复，不是固定拆成单 Pod 调度。
+Active 中的 Unit 仍可追加成员；交给 Buffer 后名单固定。后到的 Partial 成员另成一批，后到的 Atomic 成员可以汇入尚未启动的同组 Record。Pod 事件只是触发检查，不再把本轮候选范围限制为事件对应的一个 Pod。Partial 的区别在于允许部分成功和按失败范围恢复，不是固定拆成单 Pod 调度。
 
 组装中的正常成员与已有明确失败的成员分开成批，避免正常成员因为混入失败任务而被一起放进 Fail。已经组装好后才发生的成员失败，以及执行中的部分结果，仍需要后续完善反馈、拆分和回送；本次没有实现完整的部分恢复流程。
 
@@ -159,7 +159,7 @@ Accept 登记时一起写这三处，removeRecord 删除时一起清这三处。
 | 相同 UnitKey 已经登记过 | 重复调用导致重建或覆盖进度 |
 | 来源是 Queued + Active/FastRetry | Fail/Retry 还没获准执行，就绕过重试条件进入 Buffer |
 | 当前组仍是原 UID，没有删除 | 同名新组错误继承旧轮次 |
-| Unit 模式符合组声明，Atomic 成员完整 | 把整组要求偷偷拆成 Partial，或只接半组 |
+| Unit 模式符合组声明，Atomic 不超过声明数量 | 模式混用或接收超出声明的成员；不完整的 Atomic 留在 Buffer 等齐 |
 | 原 Pod 仍属于此组、未绑定且未结束 | 排队后 Pod 已改变，仍按旧引用执行 |
 | 同组没有冲突的 Atomic 轮次，也没有重复 Pod | 一个成员被两个执行轮次同时处理 |
 
@@ -185,9 +185,9 @@ Accept 登记时一起写这三处，removeRecord 删除时一起清这三处。
 
 ### 6.4 Accept 的未完成边界
 
-Active.Pop 当前只把条目取出，并不提供“这次出队已被谁接收”的凭据。Accept 只验证状态，不能证明调用者真的先 Pop 了。
+Active.Pop 只取 FIFO 条目；实际运行通过 DispatchActive 完成固定成员、Accept 和删除队列索引。
 
-main 也还没有 Active.Pop → Accept 的消费循环。将来写这段时，需要由我们一起明确：出队后 Accept 拒绝，任务应当回哪里；现在不能假设已有自动补救。
+main 的 runActive 调用 DispatchActive。Accept 拒绝时保留原关联并放回 Active，再上报错误；成功时才删除队列关联。
 
 ## 7. Observe：读集群，更新观察
 
@@ -501,64 +501,29 @@ Report 只保留最近一份 Feedback；活跃 Record 删除后，迟到反馈�
 
 ## 15. Handoff 到底在处理什么
 
-### 15.1 先把三种“清理”分开
+### 15.1 现在有哪两种交接
 
-| 清理什么 | 谁应当处理 | 当前状态 |
-| --- | --- | --- |
-| 本轮预占资源、尚未确认的执行请求 | 执行/恢复组件 | 真实组件未实现 |
-| WorkQueue 中旧 Unit 与 Pod 的关联、下一轮入队 | handlers.Handoff | Release 调用 ReleaseUnit；Return 调用 Select 的回送输入，两条已接 |
-| Buffer 的 Record、groups、owners | finishHandoff / ConfirmHandoff → removeRecord | 已有代码，前提是队列已处理成功 |
+出队交接：DispatchActive 把待调度 Unit 交给 Buffer，成功后删除 WorkQueue 的索引。
 
-Handoff 处理第二项，并在成功后允许第三项发生。它不处理第一项，不删除集群 Pod，不计算新节点。
+结束交接：Apply 调用 Handoff。Release 只确认本轮可结束；Return / ReturnMembers 让 Select 接住下一轮成员，然后 Buffer 才清理相应归属。
 
-### 15.2 为什么不能只删 Record
+### 15.2 为什么 Release 不再清队列
 
-U 是通过 WorkQueue.Select 创建的，WorkQueue 内部还记着：A、B 属于 U。
+执行中的 Unit 已经不属于队列。队列关联在 DispatchActive 中移除，Buffer 仍保留 Record 和成员归属。不能把这两份数据混成一份“旧记录”。
 
-即使 Active.Pop 把 U 从 FIFO 里取出了，这些关联也不会自动消失。Buffer 把 U 执行完后，如果只删自己的 Record，WorkQueue 以后仍可能认为 A、B 已经有旧 Unit，拒绝组织下一轮。
+### 15.3 成功 Release 的顺序
 
-因此结束一轮要同时处理两边的旧记录。
+执行结果和资源已结清 → Evaluate 产生 Release → archiveSuccess 写入 BoltDB → Handoff 确认成功 → finishHandoff 标记 Done 并删除 Buffer 记录。
 
-### 15.3 成功 Release 时要做什么
+Release 不再调用 WorkQueue.ReleaseUnit；该方法已移除。它不删除 Kubernetes 中的组和 Pod。
 
-当前 Release 已接好，顺序是：
+### 15.4 失败 Return 的顺序
 
-```text
-执行器已确认绑定和资源收尾完成
-→ Evaluate 产生 Release
-→ archiveSuccess 保存成功快照到 BoltDB，失败则保留 Record
-→ Apply.applyHandoff 调用队列侧函数
-→ WorkQueue.ReleaseUnit 清掉旧 U 的关联
-→ Handoff 返回 nil，表示已经处理好
-→ finishHandoff 把 U 标 Done
-→ removeRecord 删除 Buffer 中 U 的记录和索引
-```
+Recover 结束并 Report → Evaluate 选择回送成员 → Handoff 把 Source Unit、成员、错误和恢复确认交给 Select → Select 创建下一轮并登记待调度关联 → 放入 Fail / Retry → Buffer 结束旧 Record，或只移走 ReturnMembers 指定的成员。
 
-不是删除 G、A、B；只是本轮 U 不再需要被跟踪。以后 informer 仍会观察这个组。
+Source 自带成员失败次数；队列不用保存执行中的旧 Unit 来累计退避。重复 Apply 仍由 Buffer 的版本和 Pending 控制；同批成员若已经在等待队列，Select 也会拒绝重复创建。
 
-ReleaseUnit 在 workqueue/release.go 中实现。先检查 Unit 为 Processing 且 Queue=None，然后删除该 Unit 的队列管理记录、组内编号，以及仍指向它的 Pod 内部状态。同组其他 Unit 和成员保留；没有任何 Unit 后删除空组目录。它不调用 MarkFinished，后面的 finishHandoff 才把 Unit 标成 Done。旧记录已经不存在时直接返回成功，重复请求不会误删新 Unit。
-
-### 15.4 失败 Return 时要做什么
-
-先由 Recover 处理必要的资源清理，Report 确认完成，Evaluate 才返回 Return。
-
-main 的 Handoff 调用 `queues.Select(SelectRequest{Return: ...})`，提供旧 U 的编号、回送成员、内部错误，以及恢复完成确认。Return 是 Select 的一种输入，不是第二套公开入队方法。
-
-普通 Pod/View 输入会跳过 Buffer 正在处理的成员；Return 表示 Buffer 明确交回这些成员，因此不走普通事件的跳过规则。它只允许回送指定旧 U 的成员，不会取走同组其他 Unit 的 Pod。
-
-源码在 `src/workqueue/select_return.go`，按三步阅读：
-
-1. `validateReturn` 检查旧 U 还在 Processing，组和 Pod 身份没有变化。Atomic 必须回送整轮；Partial 可回送多个失败成员，仍然组成一个 Unit。回送成员必须未绑定、未结束；没有列入失败范围的成员不跟着进 Fail。
-2. `newUnit` 创建新编号，加入回送成员；`prepareEnqueue` 冻结并登记 Fail 状态。这时新 Unit 还只在局部变量中，旧记录没有修改。工厂或 Unit 方法失败时可以保留旧轮次再处理。
-3. 准备成功后，`removeUnit` 删除旧队列关联，登记新 Unit 和新成员状态，`publishUnit` 放入 Fail。新成员内部进度重新从 Unscheduled 开始，同时保存这次错误和恢复确认。与普通 Select 使用同一把管理锁，其他提交不能在替换中途插入重复任务。
-
-`newUnit`、`prepareEnqueue`、`publishUnit` 在 `select_enqueue.go`，普通提交也使用这些函数。Return 不再调用普通 Policy 重新猜目标队列，因为 Evaluate 已经决定回 Fail；之后能不能重试，仍由已有 Transition 路径判断。
-
-以上成功后 Handoff 返回 nil，Buffer 的 `finishHandoff` 才把旧 U 标 Done、删除旧 Record，并重新通知这个组的评估。Partial 剩余未失败、未绑定的成员会被下一次 Evaluate 找到，生成普通 Select 决策并按正常流程入队，不会因为旧轮次结束被漏掉。`ConfirmHandoff` 后补确认回送成功时也会发出这个通知。
-
-WorkQueue 不替 Buffer 删除记录，也不修改旧 U 的冻结成员。新 Unit 暂时仍对应 Buffer 持有的 Pod，因此 Transition 在旧 Record 清理前会拒绝迁移；清理后的评估通知和 main 周期检查会继续检查 Fail/Retry。
-
-同一张 Return 请求再到达时，旧 U 已不在队列索引中，会报“旧 Unit 已不存在”，不会再建一个新 Unit。正常 Apply 通过 Pending 和 Record 版本阻止重复执行；当前本地 Handoff 没有网络调用，也没有成功一半再返回普通 error 的步骤。不保存永久的回送历史，也不承诺跨进程重启恢复。
+源码分为 selectReturn（主流程）、validateReturn（核对组和成员）、returnQueueDecision（解释目标队列）。三者在 src/workqueue/select_return.go。更完整的交接说明见 [WorkQueue 与 Buffer 的交接](queue-buffer-ownership.md)。
 
 ### 15.5 为什么分成三个函数
 
@@ -635,7 +600,7 @@ Apply 成功处理提示后删除暂存提示；如果 Transition 只是记住�
 
 | 时刻 | Record 里主要变化 | 谁决定下一步 |
 | --- | --- | --- |
-| Select 后还在 Active | 没有 Record | 等未来消费循环 Pop |
+| Select 后还在 Active | 没有 Record | runActive 通过 DispatchActive 交给 Buffer |
 | Accept U | Members=Unscheduled，登记关联 | 通知评估 |
 | Observe | Observed 中 A/B 未绑定，无匹配错误 | Evaluate → Execute Run |
 | Apply | Pending=action-1 / Execute / Run | 请求交给 Executor |
@@ -667,7 +632,7 @@ API 中 A 的条件变成 PodScheduled=False / Unschedulable
 → Apply 调用 WorkQueue.Transition
 ```
 
-这里真实资源操作仍未实现。现有测试覆盖模拟执行反馈、真实 Handoff/Select/Transition；入口测试还覆盖真实 Buffer → Execute → 原生 Filter，确认不会把候选节点报成完整计划。目前没有 Active 消费循环。
+这里真实资源操作仍未实现。现有测试覆盖模拟执行反馈、真实 Handoff/Select/Transition；入口测试还覆盖真实 Buffer → Execute → 原生 Filter，确认不会把候选节点报成完整计划。Active 消费循环已由 runActive 接通。
 
 ## 19. 设计取舍与已知缺口
 

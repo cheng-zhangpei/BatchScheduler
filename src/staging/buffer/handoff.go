@@ -14,19 +14,22 @@ func (b *Buffer) applyHandoff(ctx context.Context, d staging.Decision) error {
 	if b.handlers.Handoff == nil {
 		return staging.ErrHandlerUnavailable
 	}
+	// 标识自己现在已经进入收尾了，别再进来收尾了
 	_, request, err := b.beginAction(d)
 	if err != nil {
 		return err
 	}
+	// 将成功记录下来持久化到boltdb中去。
 	if err := b.archiveSuccess(ctx, d, request.ActionID); err != nil {
-		// 数据没存成，队列还没有动；保留 Record，取消本次等待，允许重试保存。
+		// 这个函数说简单点就是如果有错误就返回错误，如果handoff的过程没有错误就清理掉自己的record，因为已经往上传递要重新调度了
 		return b.finishHandoff(d, request.ActionID, err)
 	}
+	// 让 WorkQueue 清掉旧 Unit 的登记。
 	err = b.handlers.Handoff(ctx, request)
 	return b.finishHandoff(d, request.ActionID, err)
 }
 
-// finishHandoff 处理队列函数的返回结果：
+// finishHandoff WorkQueue 确认成功后，Buffer 才删除自己的旧 Record 和成员归属。
 // nil：队列已经处理好，删旧记录；普通 error：确定没做成，保留记录并允许下次重试；
 // ErrHandoffUnknown：不知道做成没有，保留 Pending，等查清楚后调用 ConfirmHandoff。
 func (b *Buffer) finishHandoff(d staging.Decision, id string, handoffErr error) error {

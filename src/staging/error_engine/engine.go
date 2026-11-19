@@ -47,6 +47,7 @@ func Decide(input Input) (Decision, bool) {
 	if input.Queued != nil {
 		return decideQueuedError(input)
 	}
+	// 这里要处理的是现在buffer中的record不能再使用的情况
 	if input.Invalidated {
 		return handleInvalidatedAttempt(input), true
 	}
@@ -77,6 +78,7 @@ func handleInvalidatedAttempt(input Input) Decision {
 }
 
 // handleRetryableFailure 处理资源不足等可能再次尝试的错误：本轮先恢复，再回 Fail。
+// 这个地方的恢复是要
 // 不是现在直接重试；任务回到队列后，decideFailedQueue 再安排 Fail → Retry。
 func handleRetryableFailure(input Input) Decision {
 	return recoverThenFail(input)

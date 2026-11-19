@@ -80,6 +80,10 @@ func drainActive(t *testing.T, w *WorkQueue, expected int) []Unit {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// 下面的测试把取出的对象当成已离开 Active；固定名单后再检查后续行为。
+		if err := unit.Freeze(); err != nil {
+			t.Fatal(err)
+		}
 		units = append(units, unit)
 	}
 	return units
@@ -117,7 +121,7 @@ func TestSelectRoutesBySourceAndMode(t *testing.T) {
 				if len(unit.Members()) != tc.wantMembers || !unit.Frozen() {
 					t.Fatalf("成员范围或冻结状态错误: %+v", unit.Members())
 				}
-				if unit.State().Queue != QueueActive || unit.State().Phase != UnitQueued {
+				if unit.State().Queue != QueueActive || unit.State().Phase != UnitFrozen {
 					t.Fatalf("首次入队状态错误: %+v", unit.State())
 				}
 				if err := unit.AddMember(PodRef{Name: "late", UID: "late"}); !errors.Is(err, ErrUnitFrozen) {
@@ -133,15 +137,18 @@ func TestSelectRoutesBySourceAndMode(t *testing.T) {
 	}
 }
 
-func TestSelectAtomicWaitsThenReusesAssembly(t *testing.T) {
+func TestSelectAtomicEnqueuesEarlyAndGrowsWhileActive(t *testing.T) {
 	full := testView("work", "job", AllTogether, 3, 3)
 	partial := *full
 	partial.Members = full.Members[:1]
 	w := queueFor(&partial)
 	selectOK(t, w, SelectRequest{View: &partial})
-	drainActive(t, w, 0)
 	key := full.Members[0].Group
 	id := w.groups[key].pods[full.Members[0].Pod.UID].UnitID
+	u := w.groups[key].units[id]
+	if u.State().Queue != QueueActive || u.Frozen() {
+		t.Fatal("Atomic 应先入 Active，并允许继续收集成员")
+	}
 	selectOK(t, w, SelectRequest{View: full})
 	units := drainActive(t, w, 1)
 	if units[0].Key().ID != id || len(units[0].Members()) != 3 {
@@ -209,7 +216,6 @@ func TestSelectReplacesRecreatedPodBeforeFreeze(t *testing.T) {
 	initial.Members = []group.PodView{{Pod: old, Group: full.Members[0].Group}}
 	w := queueFor(&initial)
 	selectOK(t, w, SelectRequest{View: &initial})
-	drainActive(t, w, 0)
 	selectOK(t, w, SelectRequest{View: full})
 	units := drainActive(t, w, 1)
 	for _, member := range units[0].Members() {
@@ -236,11 +242,7 @@ func TestSelectHonorsStagingLookupBoundary(t *testing.T) {
 			w := queueFor(view)
 			w.Staging = testStaging{key: view.Members[0].Group, uid: view.Members[0].Pod.UID}
 			selectOK(t, w, SelectRequest{View: view})
-			want := 0
-			if mode == AllowPartial {
-				want = 1
-			}
-			for _, unit := range drainActive(t, w, want) {
+			for _, unit := range drainActive(t, w, 1) {
 				for _, member := range unit.Members() {
 					if member.UID == view.Members[0].Pod.UID {
 						t.Fatal("已暂存成员被重复入队")

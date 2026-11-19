@@ -34,7 +34,7 @@ func (b *Buffer) NotifyRetry(condition workqueue.RetryCondition) {
 }
 
 // RunQueueChecks 每隔 interval 通知检查一次 Fail/Retry 中的组。
-// 否则集群没变化时，退避时间即使到了也没人再评估。时钟通知不等于资源真的改善。
+// 否则集群没变化时，退避时间即使到了也没人再评估
 // 当前遍历等待中的组，没有为每个 Unit 开线程；后面再考虑只检查刚到期的任务。
 func (b *Buffer) RunQueueChecks(ctx context.Context, interval time.Duration) {
 	if interval <= 0 || b.handlers.WaitingGroups == nil {

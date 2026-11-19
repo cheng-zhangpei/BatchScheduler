@@ -61,11 +61,12 @@ func (h workQueueHandlers) handoff(ctx context.Context, request staging.Handoff)
 	}
 	switch request.Decision.Action {
 	case staging.ActionRelease:
-		return h.queues.ReleaseUnit(request.Unit.Key())
+		// 出队时已清掉队列关联，成功记录也已归档；此处确认后 Buffer 结束本轮。
+		return nil
 	case staging.ActionReturn, staging.ActionReturnMembers:
 		// Return 结束旧轮次；ReturnMembers 只交回未放置成员，让旧轮次继续执行。
 		return h.queues.Select(workqueue.SelectRequest{Return: &workqueue.ReturnRequest{
-			Previous: request.Unit.Key(), Members: request.Decision.Members,
+			Source: request.Unit, Members: request.Decision.Members,
 			Failure: request.Decision.Failure, RecoveryComplete: true,
 			KeepPrevious: request.Decision.Action == staging.ActionReturnMembers,
 			To:           request.Decision.To,

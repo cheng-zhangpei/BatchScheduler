@@ -89,6 +89,7 @@ func (e *Executor) Run(ctx context.Context) error {
 	e.started = true
 	e.mu.Unlock()
 	inflight := newInflight(e.config)
+	// 这里其实就是启动worker去定期的从task里面拿数据了
 	inflight.start(ctx, e)
 	defer func() {
 		e.mu.Lock()
@@ -97,14 +98,17 @@ func (e *Executor) Run(ctx context.Context) error {
 		// 停止接单后，等已启动的绑定协程退出，main 才能关闭 Buffer 使用的数据库。
 		inflight.closeAndWait()
 	}()
+	//
 	for {
 		select {
+		// 上游关闭inflight
 		case <-ctx.Done():
 			return nil
 		case request := <-e.requests:
 			if ctx.Err() != nil {
 				return nil
 			}
+			// 在一个slots里面先保留一下， 这样做的原因是，可能在高并发的情况下
 			if err := inflight.Reserve(ctx); err != nil {
 				return nil
 			}
@@ -114,6 +118,7 @@ func (e *Executor) Run(ctx context.Context) error {
 				inflight.Release()
 				continue
 			}
+			// 提交任务，注意一下这里提交的是绑定的任务
 			inflight.Submit(a)
 		}
 	}
