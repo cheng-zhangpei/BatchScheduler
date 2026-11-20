@@ -16,57 +16,98 @@ var (
 	ErrAssumeNodeMissing = errors.New("暂占目标节点已不存在")
 )
 
+// AssumeResult 区分实际接纳的成员和本次放不下的成员。
+// Err 只说明对应成员为什么没接纳，不表示其他成功成员也要撤销。
+type AssumeResult struct {
+	Assumed  []Assumption
+	Rejected []AssumeRejection
+}
+
+type AssumeRejection struct {
+	Assumption Assumption
+	Err        error
+}
+
 // Assume 一次登记同一轮执行的整批暂占。每个 Pod 副本的 NodeName 已由调用方填好。
 // 先在涉及节点的副本上逐个试放，再统一写回；任一成员失败，三份共享账都不改变。
 // 这里复核累计资源和 HostPort，不提交绑定，也不修改 Buffer。
 func (c *Cache) Assume(batch []Assumption) error {
+	_, err := c.assume(batch, false)
+	return err
+}
+
+// AssumePartial 按输入顺序尝试成员：资源不足、端口冲突或节点消失时跳过该成员，
+// 继续尝试后面的成员。成功部分统一提交；身份冲突等错误仍拒绝本次新增占用。
+// 全部放不下时返回空 Assumed，由执行器按整轮失败处理。
+func (c *Cache) AssumePartial(batch []Assumption) (AssumeResult, error) {
+	return c.assume(batch, true)
+}
+
+func (c *Cache) assume(batch []Assumption, partial bool) (AssumeResult, error) {
 	prepared, err := prepareAssumptions(batch)
 	if err != nil {
-		return err
+		return AssumeResult{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 第一段：在最新资源账的副本上累计试放，只复制这批成员涉及的节点。如果没有通过就往外抛出错误。
+	// 第一段：在最新资源账的副本上累计试放。Atomic 遇到失败整批不写，Partial 跳过放不下的成员。
 	nodes := make(map[string]*framework.NodeInfo)
 	pending := make([]Assumption, 0, len(prepared))
+	var result AssumeResult
 	for _, record := range prepared {
 		recorded, err := c.alreadyAssumed(record)
 		if err != nil {
-			return err
+			return AssumeResult{}, err
 		}
 		if recorded {
+			result.Assumed = append(result.Assumed, record)
 			continue
 		}
-		pod := record.Pod
-		if nodes[pod.Spec.NodeName] == nil {
-			current := c.nodes[pod.Spec.NodeName]
-			if current == nil || current.Node() == nil {
-				return fmt.Errorf("%w: %s", ErrAssumeNodeMissing, pod.Spec.NodeName)
+		if err := c.tryAssumption(record, nodes); err != nil {
+			if partial && (errors.Is(err, ErrAssumeNoFit) || errors.Is(err, ErrAssumeNodeMissing)) {
+				result.Rejected = append(result.Rejected, AssumeRejection{Assumption: record, Err: err})
+				continue
 			}
-			nodes[pod.Spec.NodeName] = current.SnapshotConcrete()
+			return AssumeResult{}, err
 		}
-		node := nodes[pod.Spec.NodeName]
-		if !upstream.FitsForPlacement(pod, node) {
-			return fmt.Errorf("%w: Pod %s/%s → %s", ErrAssumeNoFit, pod.Namespace, pod.Name, pod.Spec.NodeName)
-		}
-		info, err := framework.NewPodInfo(pod)
-		if err != nil {
-			return fmt.Errorf("Assume 读取 Pod %s/%s: %w", pod.Namespace, pod.Name, err)
-		}
-		node.AddPodInfo(info)
 		pending = append(pending, record)
+		result.Assumed = append(result.Assumed, record)
 	}
 
-	// 第二段：全部试放通过后，一起替换节点总账、Pod 索引和暂占明细。
+	// 第二段：把实际接纳部分一起写入节点总账、Pod 索引和暂占明细。
 	// 读取快照和 informer 更新使用同一把锁，只会看见提交前或提交后的完整结果。
-	for name, node := range nodes {
-		c.nodes[name] = node
+	if len(pending) > 0 {
+		for name, node := range nodes {
+			c.nodes[name] = node
+		}
 	}
 	for _, record := range pending {
 		c.pods[record.Pod.UID] = record.Pod
 		c.assumed[record.Pod.UID] = record
 	}
+	return result, nil
+}
+
+// tryAssumption 只改本批次的节点副本。成功占用会参与后一个成员的检查。
+func (c *Cache) tryAssumption(record Assumption, nodes map[string]*framework.NodeInfo) error {
+	pod := record.Pod
+	if nodes[pod.Spec.NodeName] == nil {
+		current := c.nodes[pod.Spec.NodeName]
+		if current == nil || current.Node() == nil {
+			return fmt.Errorf("%w: %s", ErrAssumeNodeMissing, pod.Spec.NodeName)
+		}
+		nodes[pod.Spec.NodeName] = current.SnapshotConcrete()
+	}
+	node := nodes[pod.Spec.NodeName]
+	if !upstream.FitsForPlacement(pod, node) {
+		return fmt.Errorf("%w: Pod %s/%s → %s", ErrAssumeNoFit, pod.Namespace, pod.Name, pod.Spec.NodeName)
+	}
+	info, err := framework.NewPodInfo(pod)
+	if err != nil {
+		return fmt.Errorf("Assume 读取 Pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	node.AddPodInfo(info)
 	return nil
 }
 

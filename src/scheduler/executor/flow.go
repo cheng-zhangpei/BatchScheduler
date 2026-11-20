@@ -20,6 +20,7 @@ type executionAttempt struct {
 // 返回 nil Attempt 表示这一轮没有进入绑定：已经处理失败，或这是单独的恢复请求。
 func (e *Executor) prepareExecution(ctx context.Context, request staging.Execution) (*executionAttempt, error) {
 	a := &executionAttempt{Attempt: steps.Attempt{Request: request, Plan: request.Plan}, failure: request.Failure}
+	// 之前一轮出现问题，所以现在要清理inflight里面的内容
 	if request.Operation == staging.OperationRecover {
 		// 这是执行之外发现旧轮次异常后的恢复入口，不是正常流水线每步都回到 Buffer。
 		a.Reserved = len(request.Plan) != 0 // 有旧计划时不能直接假定没有遗留资源。

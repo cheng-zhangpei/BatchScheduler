@@ -2,8 +2,10 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
@@ -45,6 +47,9 @@ func (r *Runner) Assume(ctx context.Context, a *Attempt) error {
 	if len(batch) != len(a.Plan) {
 		return fmt.Errorf("Assume 计划含有不属于本轮的成员")
 	}
+	if a.Request.Mode == workqueue.AllowPartial {
+		return r.assumePartial(a, batch)
+	}
 	if err := r.resources.Assume(batch); err != nil {
 		return err
 	}
@@ -52,5 +57,41 @@ func (r *Runner) Assume(ctx context.Context, a *Attempt) error {
 	// 计划里有位置不等于已经占到资源；失败时不能用计划冒充暂占结果。
 	a.AssumedMembers = assumed
 	a.Reserved = true
+	return nil
+}
+
+// assumePartial 把最新资源账上放不下的成员摘出，绑定计划只保留真正暂占成功者。
+// 这里的 Unplaced 只包含 Assume 新发现的失败，Executor 随后合并 Filter/Plan 的未放置成员。
+func (r *Runner) assumePartial(a *Attempt, batch []resourcecache.Assumption) error {
+	result, err := r.resources.AssumePartial(batch)
+	if err != nil {
+		return err
+	}
+	if len(result.Assumed) == 0 {
+		// 没有成员可继续 Bind，没有新增占用；整轮交给原来的恢复反馈路径。
+		return result.Rejected[0].Err
+	}
+	plan := make(map[workqueue.PodRef]string, len(result.Assumed))
+	assumed := make([]workqueue.PodRef, 0, len(result.Assumed))
+	for _, record := range result.Assumed {
+		ref := workqueue.PodRef{Name: record.Pod.Name, UID: record.Pod.UID}
+		plan[ref] = record.Pod.Spec.NodeName
+		assumed = append(assumed, ref)
+	}
+	a.Plan, a.AssumedMembers, a.Reserved = plan, assumed, true
+	if len(result.Rejected) > 0 {
+		a.Resources = &staging.ResourceResult{Assumed: assumed}
+		for _, rejected := range result.Rejected {
+			reason := workqueue.ReasonUnschedulable // 累计资源、Pod 数量或 HostPort 放不下。
+			if errors.Is(rejected.Err, resourcecache.ErrAssumeNodeMissing) {
+				reason = workqueue.ReasonNodeUnavailable
+			}
+			pod := rejected.Assumption.Pod
+			a.Resources.Unplaced = append(a.Resources.Unplaced, staging.UnplacedMember{
+				Pod:     workqueue.PodRef{Name: pod.Name, UID: pod.UID},
+				Failure: group.FailureInfo{Reason: reason, Message: rejected.Err.Error()},
+			})
+		}
+	}
 	return nil
 }

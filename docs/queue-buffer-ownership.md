@@ -1,6 +1,6 @@
 # WorkQueue 与 Buffer 的交接
 
-更新：2026-11-18。本次只调整任务交接、Active 组装、Atomic 等齐和失败回送。Fail 长期驻留、过期时间、容量淘汰暂不处理。
+更新：2026-11-19。本文说明任务交接、Active 组装、Atomic 等齐、失败回送，以及 Partial 的 Assume 部分接纳。Fail 长期驻留、过期时间、容量淘汰暂不处理。
 
 ## 1. 谁保存什么
 
@@ -73,6 +73,8 @@ Partial 保持原语义：当前可执行的一批成员可以独立启动，不
 ReturnMembers 成功后，Buffer 只交出指定成员；其他成员的 Record、ActionID 和绑定反馈继续保留。整个 Return 成功后，Buffer 才结束旧 Record。
 
 每次回送只给这批失败成员的 FailedAttempts 加一。计数随 Unit 转入 Buffer，之后再随 Source 带回，原来的递增退避不会因为删除队列索引而重置。
+
+Partial 在 Assume 复核最新资源时也允许部分接纳。ResourceCache 按输入顺序尝试各成员，跳过资源不足、HostPort 冲突或节点已消失的成员，统一写入成功部分。Executor 将绑定计划缩减到实际接纳名单，把新失败成员与 Filter/Plan 的 Unplaced 合并，再通过 Report → Evaluate → ReturnMembers 回送。全部放不下时没有新增暂占，仍按整轮失败处理。Atomic 继续整批成功或整批不写。本次不重新搜索替代节点，也不扩展通信规划对其他 Unit 端点的读取。
 
 ## 6. 本次没有改什么
 

@@ -58,8 +58,10 @@ func (e *Executor) schedule(ctx context.Context, a *executionAttempt) error {
 		return err
 	}
 	if len(unplaced) > 0 {
-		// A、B 确实占到资源后，才通知 Buffer 可以交回 C。
-		a.Resources = &staging.ResourceResult{Assumed: a.AssumedMembers}
+		// 合并 Filter/Plan 与 Assume 两处发现的未放置成员，不能覆盖 Assume 的失败名单。
+		if a.Resources == nil {
+			a.Resources = &staging.ResourceResult{Assumed: a.AssumedMembers}
+		}
 		for _, member := range unplaced {
 			a.Resources.Unplaced = append(a.Resources.Unplaced, staging.UnplacedMember{Pod: member.Pod, Failure: member.Failure})
 		}

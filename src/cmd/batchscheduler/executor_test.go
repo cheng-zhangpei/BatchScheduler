@@ -58,6 +58,11 @@ func queuedExecutorFixture(t *testing.T, configs ...execution.Config) (*buffer.B
 
 func queuedExecutorFixtureWithMembers(t *testing.T, count int, configs ...execution.Config) (*buffer.Buffer, *workqueue.WorkQueue, *execution.Executor, *group.View, *resourcecache.Cache) {
 	t.Helper()
+	return queuedExecutorFixtureWithMode(t, count, workqueue.AllTogether, configs...)
+}
+
+func queuedExecutorFixtureWithMode(t *testing.T, count int, mode workqueue.SubmitMode, configs ...execution.Config) (*buffer.Buffer, *workqueue.WorkQueue, *execution.Executor, *group.View, *resourcecache.Cache) {
+	t.Helper()
 	key := group.Key{Namespace: "work", Name: "job", UID: "group"}
 	controller := true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: "pod", UID: "pod",
@@ -66,7 +71,7 @@ func queuedExecutorFixtureWithMembers(t *testing.T, count int, configs ...execut
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 	}}}}}
 	view := &group.View{Group: &scheduling.PodGroup{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, UID: key.UID},
-		Spec: scheduling.PodGroupSpec{Members: int32(count), SubmitMode: string(workqueue.AllTogether)}}, Members: []group.PodView{{Group: key, Pod: pod}}}
+		Spec: scheduling.PodGroupSpec{Members: int32(count), SubmitMode: string(mode)}}, Members: []group.PodView{{Group: key, Pod: pod}}}
 	for i := 1; i < count; i++ {
 		member := pod.DeepCopy()
 		member.Name = fmt.Sprintf("pod-%d", i)

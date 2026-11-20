@@ -70,6 +70,45 @@ func TestAssumeFailureDoesNotClaimReservation(t *testing.T) {
 	}
 }
 
+func TestPartialAssumeKeepsSuccessfulPlanAndRecoverOnlyForgetsIt(t *testing.T) {
+	r, a := assumeStepFixture()
+	a.Request.Mode = workqueue.AllowPartial
+	node := r.resources.Snapshot().Nodes["node-a"].Node().DeepCopy()
+	node.Status.Allocatable[corev1.ResourceCPU] = resource.MustParse("3")
+	r.resources.UpdateNode(node)
+	if err := r.Assume(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if !a.Reserved || len(a.Plan) != 1 || len(a.AssumedMembers) != 1 || a.Resources == nil || len(a.Resources.Unplaced) != 1 || a.Resources.Unplaced[0].Pod != a.Request.Members[1] {
+		t.Fatal("Partial 没有保留实际接纳的计划和未放置名单")
+	}
+	bindings, err := bindingRequests(a)
+	if err != nil || len(bindings) != 1 || bindings[0].Name != "a" {
+		t.Fatalf("Bind 必须只接收实际暂占成员: %v", err)
+	}
+	if err := r.Recover(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Reserved || r.resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 {
+		t.Fatal("Recover 没有释放成功部分的实际暂占")
+	}
+}
+
+func TestPartialAssumeAllRejectedNeedsNoForget(t *testing.T) {
+	r, a := assumeStepFixture()
+	a.Request.Mode = workqueue.AllowPartial
+	node := r.resources.Snapshot().Nodes["node-a"].Node().DeepCopy()
+	node.Status.Allocatable[corev1.ResourceCPU] = resource.MustParse("1")
+	r.resources.UpdateNode(node)
+	if err := r.Assume(context.Background(), a); !errors.Is(err, resourcecache.ErrAssumeNoFit) || a.Reserved || len(a.AssumedMembers) != 0 {
+		t.Fatalf("全拒绝应报告整轮失败，不能声称已经暂占: %v", err)
+	}
+	r.resources = nil
+	if err := r.Recover(context.Background(), a); err != nil {
+		t.Fatalf("未暂占时不应要求 Forget: %v", err)
+	}
+}
+
 func TestRecoverBeforeAssumeNeedsNoResourceCache(t *testing.T) {
 	for _, mode := range []workqueue.SubmitMode{workqueue.AllTogether, workqueue.AllowPartial} {
 		t.Run(string(mode), func(t *testing.T) {
