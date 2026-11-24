@@ -23,6 +23,9 @@ const (
 	// ReasonBindingRejected 已确认可重试的临时绑定拒绝，且成员仍未绑定并完成清理。
 	// 权限/无效请求须归入下方对应分类；请求超时不能直接归为此类。
 	ReasonBindingRejected = "BindingRejected"
+	// ReasonBindingConfirmationExpired 经多次有效核查仍未绑定，已按约定策略释放暂占。
+	// 允许退避后再调度；它不表示服务端证明旧请求失败。
+	ReasonBindingConfirmationExpired = "BindingConfirmationExpired"
 )
 
 // 下列分类不进入自动 Retry；未知分类同样默认拒绝，而不是“所有错误都重试”。
@@ -89,7 +92,7 @@ func PlanRetry(reason string, notBefore time.Time) (RetryPlan, error) {
 		plan.Condition = RetryOnPlacement
 	case ReasonDependencyNotReady:
 		plan.Condition = RetryOnDependency
-	case ReasonTransientSchedulingError, ReasonBindingRejected:
+	case ReasonTransientSchedulingError, ReasonBindingRejected, ReasonBindingConfirmationExpired:
 		if notBefore.IsZero() {
 			return RetryPlan{}, fmt.Errorf("临时错误 %s 必须指定 RetryAfter 退避截止时间", reason)
 		}

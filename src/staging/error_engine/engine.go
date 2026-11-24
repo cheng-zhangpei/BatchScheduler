@@ -59,7 +59,7 @@ func Decide(input Input) (Decision, bool) {
 		return handleRetryableFailure(input), true
 	case workqueue.ReasonInsufficientResources, workqueue.ReasonNodeUnavailable,
 		workqueue.ReasonPlacementConstraints, workqueue.ReasonDependencyNotReady,
-		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected:
+		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected, workqueue.ReasonBindingConfirmationExpired:
 		return handleRetryableFailure(input), true
 	case workqueue.ReasonInvalidSpec, workqueue.ReasonForbidden:
 		return handleConfigurationFailure(input), true

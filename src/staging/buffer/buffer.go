@@ -145,7 +145,7 @@ func (b *Buffer) Accept(ctx context.Context, unit workqueue.Unit) error {
 	for otherKey := range b.groups[key.Group] {
 		other := b.records[otherKey]
 		// Atomic 同时只执行一轮。旧 Atomic 没结束时，改成 Partial 也不能另开一轮。
-		if mode == workqueue.AllTogether || other.Unit.Mode() == workqueue.AllTogether {
+		if (mode == workqueue.AllTogether || other.Unit.Mode() == workqueue.AllTogether) && !atomicBindingRecoverySettled(other) {
 			return fmt.Errorf("Atomic 组仍有未释放单元 %s，不能接收另一轮", otherKey.ID)
 		}
 		for ref := range other.Members {

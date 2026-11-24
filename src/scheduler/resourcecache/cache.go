@@ -34,18 +34,20 @@ type Cache struct {
 	assumed map[types.UID]Assumption
 
 	// 超时核查分两处存：仍保留暂占的留在 bindingChecks；释放后的移到有界 LRU。
-	// 当前只建立结构，后续再接入 Bind 超时、主动查询和释放流程。
-	bindingChecks  map[BindingCheckKey]BindingCheck
-	releasedChecks *bindingCheckHistory
+	// bindingCheckPods 按 UID 找到核查记录，删除通知不用遍历所有待核查任务。
+	bindingChecks    map[BindingCheckKey]BindingCheck
+	bindingCheckPods map[types.UID]map[BindingCheckKey]struct{}
+	releasedChecks   *bindingCheckHistory
 }
 
 // New 创建空资源账，由 informer 的初始事件填入节点和已有绑定。
 func New() *Cache {
 	return &Cache{
-		nodes:          make(map[string]*framework.NodeInfo),
-		pods:           make(map[types.UID]*corev1.Pod),
-		assumed:        make(map[types.UID]Assumption),
-		bindingChecks:  make(map[BindingCheckKey]BindingCheck),
-		releasedChecks: newBindingCheckHistory(DefaultBindingCheckPolicy().ReleasedCapacity),
+		nodes:            make(map[string]*framework.NodeInfo),
+		pods:             make(map[types.UID]*corev1.Pod),
+		assumed:          make(map[types.UID]Assumption),
+		bindingChecks:    make(map[BindingCheckKey]BindingCheck),
+		bindingCheckPods: make(map[types.UID]map[BindingCheckKey]struct{}),
+		releasedChecks:   newBindingCheckHistory(DefaultBindingCheckPolicy().ReleasedCapacity),
 	}
 }

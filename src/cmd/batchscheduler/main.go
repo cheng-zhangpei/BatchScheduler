@@ -46,6 +46,8 @@ func run() error {
 	flag.DurationVar(&executionConfig.BindRetry.InitialBackoff, "bind-retry-backoff", executionConfig.BindRetry.InitialBackoff, "绑定重试的初始退避间隔")
 	flag.DurationVar(&executionConfig.BindRetry.MaxBackoff, "bind-retry-max-backoff", executionConfig.BindRetry.MaxBackoff, "绑定重试的最大退避间隔")
 	flag.DurationVar(&executionConfig.BindingCheckInterval, "bind-check-interval", executionConfig.BindingCheckInterval, "未知绑定结果的后台核查间隔")
+	flag.IntVar(&executionConfig.BindingUnboundChecks, "bind-unbound-checks", executionConfig.BindingUnboundChecks, "连续有效核查未绑定多少次后释放暂占")
+	flag.IntVar(&executionConfig.BindingHistoryCapacity, "bind-history-capacity", executionConfig.BindingHistoryCapacity, "释放暂占后保留的旧执行记录上限，0 表示不保留")
 	flag.Parse()
 	if err := executionConfig.Validate(); err != nil {
 		return err

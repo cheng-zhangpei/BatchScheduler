@@ -31,6 +31,11 @@ func evaluateCompletion(d staging.Decision, record *staging.Record, facts attemp
 	if facts.invalidated || facts.failure != nil || !facts.allBound {
 		return d, false
 	}
+	if len(facts.members) == 0 && record.ResponsibilitiesSettled {
+		// Partial 全部成员已交给新轮次，只清掉旧 Record，不把空轮次归档成成功。
+		d.Action, d.Reason = staging.ActionRelease, "NoRemainingMembers"
+		return d, true
+	}
 	d.Reason = "MembersBoundAwaitingSettlement"
 	if record.ResponsibilitiesSettled {
 		d.Action, d.Reason = staging.ActionRelease, "AttemptComplete"

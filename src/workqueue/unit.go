@@ -28,7 +28,7 @@ type PodRef struct {
 type SubmitMode string
 
 const (
-	// AllTogether 要求本轮成员整体推进，具体失败处理规则尚未定义。
+	// AllTogether 首次整组接纳；绑定恢复当前允许保留成功成员，只重试失败成员。
 	AllTogether SubmitMode = "AllTogether"
 	// AllowPartial 允许本轮部分成员先推进。
 	AllowPartial SubmitMode = "AllowPartial"

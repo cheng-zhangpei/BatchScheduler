@@ -63,6 +63,9 @@ type Feedback struct {
 	Pod       *workqueue.PodRef
 	Failure   *group.FailureInfo
 	Plan      map[workqueue.PodRef]string // Planned 时提交完整成员 → 节点计划。
+	// ReleasedBindings 是后台核查按策略 Forget 的成员，不等于服务端明确拒绝。
+	// 失败成员回送，已绑定成员保留；Atomic 恢复阶段暂时也采用这个放宽策略。
+	ReleasedBindings []workqueue.PodRef
 	// Resources 携带成员接纳结果；Report 保存到 Record，不在接收时回送队列。
 	// Progress 携带部分暂占结果时，保留已接纳成员的执行 Pending。
 	Resources               *ResourceResult
@@ -118,6 +121,7 @@ type Record struct {
 	ExecutionBlocked        bool                        // 代码停在待实现步骤；不能因评估通知重新执行整轮。
 	Plan                    map[workqueue.PodRef]string // 调度算法算出的 Pod → Node 计划。
 	Resources               *ResourceResult             // 本次接纳了谁、谁未放置；由 Report 保存，交出后由 ReturnedMembers 标记。
+	BindingRecovery         bool                        // Atomic 确认超时后暂时按成员恢复；首次接纳规则不变。
 	PendingOperation        Operation                   // 正在等待的整轮请求：Run 或 Recover。
 	PendingDecision         Action                      // 正在等待的动作类型，例如 Execute 或 Return。
 	LastFeedback            *Feedback                   // 只记住最近一次结果；相同结果再发来时不重复处理。
@@ -129,6 +133,7 @@ type ObservedGroup struct {
 	Exists     bool
 	Deleting   bool
 	Generation int64
+	BoundPeers int // 同组且不属于当前 Unit、已经实际绑定的成员数，供 Atomic 重试判断。
 	Members    map[workqueue.PodRef]ObservedPod
 }
 

@@ -31,5 +31,18 @@ func waitingForAtomicMembers(record *staging.Record, facts attemptFacts) bool {
 		return false
 	}
 	definition := record.Unit.Definition()
-	return definition == nil || len(facts.members) != int(definition.Spec.Members)
+	if definition == nil {
+		return true
+	}
+	count := len(facts.members)
+	// 首次 Atomic 仍等齐。重试 Unit 可以把同组已绑定成员算在内，只调度剩余成员。
+	retrying := len(facts.members) > 0
+	attempts := record.Unit.State().FailedAttempts
+	for _, ref := range facts.members {
+		retrying = retrying && attempts[ref.UID] > 0
+	}
+	if retrying && record.Observed != nil {
+		count += record.Observed.BoundPeers
+	}
+	return count != int(definition.Spec.Members)
 }

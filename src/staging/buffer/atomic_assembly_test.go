@@ -9,7 +9,31 @@ import (
 	"batchscheduler/src/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+func TestAtomicBoundPeersOnlyCompleteRetryAdmission(t *testing.T) {
+	for _, retrying := range []bool{false, true} {
+		b, view := fixture(t, workqueue.AllTogether)
+		view.Members[0].Pod.Spec.NodeName = "node-a"
+		u := queuedUnit(t, view, "remaining", workqueue.AllTogether, 1)
+		if retrying {
+			if err := u.SetFailedAttempts(map[types.UID]int{view.Members[1].Pod.UID: 1}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := b.Accept(context.Background(), u); err != nil {
+			t.Fatal(err)
+		}
+		d := decisionFor(t, b, u.Key())
+		if retrying && d.Action != staging.ActionExecute {
+			t.Fatalf("重试未计入已经绑定的同组成员: %+v", d)
+		}
+		if !retrying && (d.Action != staging.ActionWait || d.Reason != "AwaitingGroupMembers") {
+			t.Fatalf("首次 Atomic 接纳被意外放宽: %+v", d)
+		}
+	}
+}
 
 // 模拟 Informer 先看到 A，稍后才看到 B。队列不等齐，Buffer 也不能提前执行 A。
 func TestAtomicBatchesJoinInBufferBeforeExecution(t *testing.T) {

@@ -124,7 +124,9 @@ func validateReturn(request ReturnRequest, view *group.View) error {
 	if mode == "" {
 		mode = AllTogether
 	}
-	if mode != source.Mode() || (request.KeepPrevious && mode != AllowPartial) {
+	bindingRecovery := request.KeepPrevious && request.Failure.Reason == ReasonBindingConfirmationExpired
+	// 绑定核查超时是当前 Atomic 的临时例外：保留成功成员，失败成员另建 Unit。
+	if mode != source.Mode() || (request.KeepPrevious && mode != AllowPartial && !bindingRecovery) {
 		return fmt.Errorf("回送模式与当前组声明不符")
 	}
 	original := make(map[PodRef]bool)
@@ -148,10 +150,10 @@ func validateReturn(request ReturnRequest, view *group.View) error {
 		}
 		returned[ref] = true
 	}
-	if mode == AllTogether && len(returned) != len(original) {
+	if mode == AllTogether && len(returned) != len(original) && !bindingRecovery {
 		return fmt.Errorf("Atomic 必须回送本轮全部成员")
 	}
-	if request.KeepPrevious && len(returned) == len(original) {
+	if request.KeepPrevious && len(returned) == len(original) && !bindingRecovery {
 		return fmt.Errorf("部分回送需要给原 Unit 留下继续执行的成员")
 	}
 	return nil

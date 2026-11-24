@@ -37,6 +37,9 @@ func NewExecutor(views workqueue.GroupViewReader, resources *resourcecache.Cache
 	runner.BindRequestTimeout = config.BindRetry.RequestTimeout
 	handler := &bindFailHandler{runner: runner, policy: config.BindRetry}
 	runner.HandleBindFailure = handler.Handle
+	if resources != nil {
+		resources.SetBindingHistoryCapacity(config.BindingHistoryCapacity)
+	}
 	return &Executor{steps: runner, bindFailures: handler, resources: resources, config: config, requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
 }
 

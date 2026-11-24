@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"batchscheduler/src/group"
+	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -15,6 +16,9 @@ func (b *Buffer) acceptAtomicMembers(incoming workqueue.Unit, definition *group.
 	key := incoming.Key().Group
 	for recordKey := range b.groups[key] {
 		r := b.records[recordKey]
+		if atomicBindingRecoverySettled(r) {
+			continue // 已绑定成员只等归档，不挡住刚交回成员的新一轮。
+		}
 		if r.Unit.Mode() != workqueue.AllTogether || r.Generation != definition.Generation {
 			return false, fmt.Errorf("本组仍有其他模式或声明版本的执行记录")
 		}
@@ -52,6 +56,20 @@ func (b *Buffer) acceptAtomicMembers(incoming workqueue.Unit, definition *group.
 		return true, nil
 	}
 	return false, nil
+}
+
+// atomicBindingRecoverySettled 表示失败成员已交回，留下的成员都已绑定。
+// 旧 Record 可能还在等 informer 完成归档，但不会再调度这些成员。
+func atomicBindingRecoverySettled(r *staging.Record) bool {
+	if !r.BindingRecovery || !r.ResponsibilitiesSettled || r.PendingAction != "" || r.ReturningMembers {
+		return false
+	}
+	for _, ref := range r.ActiveMembers() {
+		if r.Members[ref].Phase != group.PodBound {
+			return false
+		}
+	}
+	return true
 }
 
 // combineWaitingAtomic 为尚未执行的一轮重建完整 Unit，沿用主 Record 的编号。

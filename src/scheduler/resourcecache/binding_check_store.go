@@ -25,6 +25,10 @@ func (c *Cache) TrackBindingChecks(unit workqueue.UnitKey, actionID string, plan
 		key := BindingCheckKey{Unit: unit, ActionID: actionID, Pod: ref}
 		if _, exists := c.bindingChecks[key]; !exists {
 			c.bindingChecks[key] = BindingCheck{Key: key, NodeName: node, State: BindingCheckPending, TimedOutAt: now}
+			if c.bindingCheckPods[ref.UID] == nil {
+				c.bindingCheckPods[ref.UID] = make(map[BindingCheckKey]struct{})
+			}
+			c.bindingCheckPods[ref.UID][key] = struct{}{}
 		}
 	}
 	return nil
@@ -47,11 +51,11 @@ func (c *Cache) ObserveBindingCheck(key BindingCheckKey, pod *corev1.Pod, now ti
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	check, exists := c.bindingChecks[key]
-	if !exists || pod.UID != key.Pod.UID || pod.Name != key.Pod.Name || pod.Namespace != key.Unit.Group.Namespace {
+	if !exists || check.State == BindingCheckGone || pod.UID != key.Pod.UID || pod.Name != key.Pod.Name || pod.Namespace != key.Unit.Group.Namespace {
 		return false, nil
 	}
 	current := c.pods[pod.UID]
-	if current == nil {
+	if current == nil && check.State != BindingCheckReleased {
 		return false, nil // 删除事件已清账，较早发出的 GET 不能把旧 Pod 加回来。
 	}
 	assumption, assumed := c.assumed[pod.UID]
@@ -59,7 +63,7 @@ func (c *Cache) ObserveBindingCheck(key BindingCheckKey, pod *corev1.Pod, now ti
 		return false, nil // 已属于后来的执行，不用旧查询修改它。
 	}
 	if pod.Spec.NodeName != "" {
-		if assumed {
+		if assumed || current == nil {
 			if err := c.updatePod(pod.DeepCopy()); err != nil {
 				return false, err
 			}
@@ -91,10 +95,14 @@ func (c *Cache) CompleteBindingChecks(keys []BindingCheckKey) {
 	defer c.mu.Unlock()
 	for _, key := range keys {
 		delete(c.bindingChecks, key)
+		delete(c.bindingCheckPods[key.Pod.UID], key)
+		if len(c.bindingCheckPods[key.Pod.UID]) == 0 {
+			delete(c.bindingCheckPods, key.Pod.UID)
+		}
 	}
 }
 
-// ReadyToRelease 只回答是否达到约定次数；实际 Forget 和转入 LRU 留给下一步接线。
+// ReadyToRelease 只回答是否达到约定次数，资源回收由 ReclaimBindingChecks 执行。
 func (check BindingCheck) ReadyToRelease(policy BindingCheckPolicy) bool {
 	return check.State == BindingCheckPending && policy.RequiredUnboundChecks > 0 && check.UnboundChecks >= policy.RequiredUnboundChecks
 }

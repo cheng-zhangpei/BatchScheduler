@@ -10,12 +10,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// evaluateUnplacedMembers 只安排 Partial 的未放置成员，不结束整个 Unit。
+// evaluateUnplacedMembers 安排 Partial 的未放置或已释放暂占成员，不结束其他成员。
 // 已暂占成员继续执行；可等待集群变化的未放置成员直接回送 Retry。
 // 返回 false 只表示这里没有提出“部分回送”，外面的 EvaluateRecord 仍会继续判断等待、恢复等动作。
 func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup bool) (staging.Decision, bool) {
-	if invalidGroup || r.Unit.Mode() != workqueue.AllowPartial || r.Resources == nil ||
-		len(r.Resources.Assumed) == 0 || len(r.Resources.Unplaced) == 0 || r.Failure != nil {
+	if invalidGroup || (r.Unit.Mode() != workqueue.AllowPartial && !r.BindingRecovery) || r.Resources == nil ||
+		len(r.Resources.Unplaced) == 0 || r.Failure != nil {
 		return d, false
 	}
 	// ExecutionPhase 来自 Executor.Report，表示执行器已经做到哪一步：
@@ -23,10 +23,10 @@ func evaluateUnplacedMembers(d staging.Decision, r *staging.Record, invalidGroup
 	// Binding：已接纳成员正在绑定；本函数只处理未参与绑定的 Unplaced，不等其他成员结束。
 	// Bound：已接纳成员的绑定已成功；剩下的 Unplaced 仍需要交回，不能直接丢掉。
 	switch r.ExecutionPhase {
-	case staging.PhaseAssumed, staging.PhaseBinding, staging.PhaseBound:
+	case staging.PhaseAssumed, staging.PhaseBinding, staging.PhaseBound, staging.PhaseRecovered:
 	default:
 		// Filter/Score/Plan 阶段尚未确认接纳结果，不能仅凭候选位置拆出下一轮。
-		// Recovering/Recovered 阶段则是在处理整轮失败，交给原来的恢复、回送流程。
+		// Recovered 且没有 Unit 级失败时，允许回送刚完成核查释放的成员。
 		return d, false
 	}
 	// 这后面的一大堆是集群的真实情况，这些真实情况决定的是，上一轮的binding是否已经成功丢出去了，

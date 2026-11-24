@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"time"
 
+	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -54,7 +56,6 @@ func (e *Executor) checkBindings(ctx context.Context) error {
 // checkBindingAttempt 只发 GET，不再补发 Bind。
 // 查到绑定就更新真实占用；未绑定就记一次有效核查；全部确认后仍走唯一的 Report 入口。
 func (e *Executor) checkBindingAttempt(ctx context.Context, checks []resourcecache.BindingCheck) error {
-	allBound := true
 	plan := make(map[workqueue.PodRef]string, len(checks))
 	keys := make([]resourcecache.BindingCheckKey, 0, len(checks))
 	var failures []error
@@ -64,28 +65,48 @@ func (e *Executor) checkBindingAttempt(ctx context.Context, checks []resourcecac
 		}
 		keys = append(keys, check.Key)
 		plan[check.Key.Pod] = check.NodeName
+		if check.State == resourcecache.BindingCheckReleased || check.State == resourcecache.BindingCheckGone {
+			continue // 资源已经处理，只需重试把结果交给 Buffer。
+		}
 		queryCtx, cancel := context.WithTimeout(ctx, e.config.BindRetry.RequestTimeout)
 		pod, err := e.steps.Client.CoreV1().Pods(check.Key.Unit.Group.Namespace).Get(queryCtx, check.Key.Pod.Name, metav1.GetOptions{})
 		cancel()
+		if apierrors.IsNotFound(err) || (err == nil && pod.UID != check.Key.Pod.UID) {
+			e.resources.MarkBindingCheckGone(check.Key)
+			continue
+		}
 		if err != nil {
-			allBound = false
 			failures = append(failures, err) // 查询失败或 NotFound 都不计作“原 Pod 仍未绑定”。
 			continue
 		}
-		confirmed, err := e.resources.ObserveBindingCheck(check.Key, pod, time.Now(), e.config.BindingCheckInterval)
-		allBound = allBound && confirmed
+		_, err = e.resources.ObserveBindingCheck(check.Key, pod, time.Now(), e.config.BindingCheckInterval)
 		if err != nil {
 			failures = append(failures, err)
 		}
 	}
-	if !allBound {
-		// TODO：达到 ReadyToRelease 阈值后，接入 Forget、转入 LRU 和 Buffer 的失败回送。
-		// Pod 删除、换 UID、绑定到其他节点的收尾也在下一步分别处理。
+	if len(failures) != 0 {
 		return errors.Join(failures...)
 	}
+	policy := resourcecache.BindingCheckPolicy{RequiredUnboundChecks: e.config.BindingUnboundChecks}
+	result, err := e.resources.ReclaimBindingChecks(keys, policy, time.Now())
+	if err != nil || !result.Ready {
+		return err
+	}
 	first := checks[0].Key
-	err := e.Report(ctx, staging.Feedback{Unit: first.Unit, ActionID: first.ActionID, Operation: staging.OperationRun,
-		Kind: staging.FeedbackFinished, Phase: staging.PhaseBound, Plan: plan, ResponsibilitiesSettled: true})
+	f := staging.Feedback{Unit: first.Unit, ActionID: first.ActionID, Operation: staging.OperationRun,
+		Kind: staging.FeedbackFinished, Phase: staging.PhaseBound, Plan: plan, ResponsibilitiesSettled: true,
+		ReleasedBindings: result.Released}
+	switch {
+	case result.Mismatched:
+		// TODO：实际绑定偏离原计划时的处理；本轮不把真实位置当成原计划成功。
+		f.Kind, f.Phase, f.ResponsibilitiesSettled = staging.FeedbackBlocked, staging.PhaseRecovering, false
+		f.Message = "实际绑定不能只靠 Forget 撤销，等待已绑定成员恢复策略"
+		f.Failure = &group.FailureInfo{Reason: workqueue.ReasonBindingConfirmationExpired, Message: f.Message}
+	case len(result.Bound) == 0:
+		f.Phase = staging.PhaseRecovered
+		f.Failure = &group.FailureInfo{Reason: workqueue.ReasonBindingConfirmationExpired, Message: "已按核查策略释放本轮暂占，等待退避重试"}
+	}
+	err = e.Report(ctx, f)
 	if err == nil || errors.Is(err, staging.ErrFeedbackObsolete) {
 		// Buffer 接住确认，或已被 informer 先一步结束了本轮，都不用继续核查。
 		e.resources.CompleteBindingChecks(keys)

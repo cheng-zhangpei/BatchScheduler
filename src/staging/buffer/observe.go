@@ -67,6 +67,11 @@ func (b *Buffer) observe(ctx context.Context, observation staging.Observation, n
 		if exists {
 			facts.Deleting = view.Group.DeletionTimestamp != nil
 			facts.Generation = view.Group.Generation
+			for ref, member := range current {
+				if _, held := record.Members[ref]; !held && member.Pod.Spec.NodeName != "" && member.Pod.DeletionTimestamp == nil {
+					facts.BoundPeers++
+				}
+			}
 		}
 		for ref := range record.Members {
 			fact := staging.ObservedPod{Known: exists}

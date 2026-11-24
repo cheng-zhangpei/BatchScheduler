@@ -22,6 +22,8 @@ const (
 	// BindingCheckReleased：已按核查策略释放暂占，保留记录以识别晚到结果。
 	// 这不表示服务端确认绑定失败。
 	BindingCheckReleased BindingCheckState = "Released"
+	// BindingCheckGone：原 UID 已删除或被替换，不再等待旧绑定。
+	BindingCheckGone BindingCheckState = "Gone"
 )
 
 // BindingCheck 只记录核查进度，不保存完整 Pod，也不代替 assumed 中的资源明细。

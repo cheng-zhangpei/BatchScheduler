@@ -30,7 +30,7 @@ func decideFailedQueue(input Input) (Decision, bool) {
 	//todo(cheng) 对于这些错误的重试还要细细权衡
 	case workqueue.ReasonUnschedulable, workqueue.ReasonInsufficientResources, workqueue.ReasonNodeUnavailable,
 		workqueue.ReasonPlacementConstraints, workqueue.ReasonDependencyNotReady,
-		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected:
+		workqueue.ReasonTransientSchedulingError, workqueue.ReasonBindingRejected, workqueue.ReasonBindingConfirmationExpired:
 		// WorkQueue 根据成员失败次数登记退避截止时间。
 	default:
 		// 权限、无效声明、绑定未知及未识别错误都不能自动重试。

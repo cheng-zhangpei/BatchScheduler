@@ -19,6 +19,11 @@ func (c *Cache) Forget(unit workqueue.UnitKey, actionID string, members []workqu
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.forget(unit, actionID, members)
+}
+
+// forget 在已持有资源锁时撤销暂占，供普通 Forget 和核查回收共用。
+func (c *Cache) forget(unit workqueue.UnitKey, actionID string, members []workqueue.PodRef) error {
 
 	// 第一段：查暂占明细，核对归属，再从对应节点副本中移除 Pod。
 	nodes := make(map[string]*framework.NodeInfo)

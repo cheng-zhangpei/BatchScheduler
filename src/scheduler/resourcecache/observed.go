@@ -35,6 +35,7 @@ func (c *Cache) RemoveNode(node *corev1.Node) {
 // 同一个 UID 再次到来时，先撤销旧记录，再按新对象记入，避免重复累加资源。
 func (c *Cache) UpdatePod(pod *corev1.Pod) error {
 	if pod.Spec.NodeName == "" {
+		// 未绑定通知不移除历史；仍需等待可能晚到的绑定。
 		return nil
 	}
 	if pod.UID == "" {
@@ -55,6 +56,10 @@ func (c *Cache) updatePod(copy *corev1.Pod) error {
 	c.pods[copy.UID] = copy
 	// 真实绑定接住同一个 Pod 后，只取消暂占身份，上面已经保留它的实际占用。
 	delete(c.assumed, copy.UID)
+	if !c.releasedChecks.empty() {
+		// 先更新实际资源账，再结束该 Pod 的历史跟踪。没有历史时直接跳过。
+		c.releasedChecks.observeBound(copy)
+	}
 	return nil
 }
 
@@ -66,6 +71,14 @@ func (c *Cache) RemovePod(pod *corev1.Pod) error {
 		return err
 	}
 	delete(c.assumed, pod.UID)
+	for key := range c.bindingCheckPods[pod.UID] {
+		check := c.bindingChecks[key]
+		check.State = BindingCheckGone
+		c.bindingChecks[key] = check
+	}
+	if !c.releasedChecks.empty() {
+		c.releasedChecks.observeBound(pod) // 原 UID 已删除，也不必再等待晚到绑定。
+	}
 	return nil
 }
 

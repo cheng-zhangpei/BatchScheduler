@@ -13,7 +13,7 @@ import (
 // 这是结果说明，不代表 Buffer 已经接住回送成员，也不代表整轮执行结束。
 type ResourceResult struct {
 	Assumed  []workqueue.PodRef // 已在 ResourceCache 记账；可以继续绑定，尚不代表绑定成功。
-	Unplaced []UnplacedMember   // 没有遗留暂占或在途绑定，可以交给 Buffer 安排下一轮的成员。
+	Unplaced []UnplacedMember   // 当前没有保留暂占，可以交给 Buffer 安排下一轮；含按核查策略释放的成员。
 }
 
 // UnplacedMember 保留未放置成员及内部错误分类，后续按 Failure.Reason 决策。

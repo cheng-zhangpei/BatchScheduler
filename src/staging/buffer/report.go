@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"batchscheduler/src/staging"
+	"batchscheduler/src/workqueue"
 )
 
 // Report 是执行器唯一的反馈入口：进展只更新记录，整轮结束才取消 Pending。
@@ -19,8 +21,15 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 	if feedback.Pod != nil {
 		return fmt.Errorf("当前按整个操作汇报，不接受单成员反馈")
 	}
+	notifyResources := false
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		b.mu.Unlock()
+		if notifyResources {
+			// 先保存本轮结果、放开记录，再通知其他等待资源变化的组。
+			b.NotifyRetry(workqueue.RetryOnResources)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -41,6 +50,9 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 	if err := validateResourceResult(r, feedback.Resources); err != nil {
 		return err
 	}
+	if err := validateReleasedBindings(r, feedback); err != nil {
+		return err
+	}
 	// 这就是之前回调的unplaced的部分的pod，也就是partial或者atomic的不同的模式是会有重试队列
 	if feedback.Resources != nil {
 		// 只记下成员划分；原 Unit、owners 和等待中的 ActionID 都保留，尚不回送。
@@ -52,6 +64,7 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 		r.Failure = nil
 	}
 	updateReportedProgress(r, feedback)
+	applyReleasedBindings(r, feedback)
 	switch feedback.Kind {
 	case staging.FeedbackProgress, staging.FeedbackUnknown:
 		// 继续执行或等待确认：同一个 ActionID 还没结束，Evaluate 只能等待。
@@ -71,8 +84,10 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 	copyFeedback := feedback
 	copyFeedback.Plan, copyFeedback.Failure = copyPlan(feedback.Plan), copyFailure(feedback.Failure)
 	copyFeedback.Resources = feedback.Resources.DeepCopy()
+	copyFeedback.ReleasedBindings = slices.Clone(feedback.ReleasedBindings)
 	r.LastFeedback = &copyFeedback
 	r.Revision++
 	b.evaluations.Add(feedback.Unit.Group)
+	notifyResources = len(feedback.ReleasedBindings) != 0
 	return nil
 }

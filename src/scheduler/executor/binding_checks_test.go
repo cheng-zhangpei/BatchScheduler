@@ -119,3 +119,42 @@ func stringOrSuccess(err error) string {
 	}
 	return err.Error()
 }
+
+func TestReclaimedBindingReportRetriesWithoutRepeatingForget(t *testing.T) {
+	for _, lateBinding := range []bool{false, true} {
+		e, a, resources, pod := bindRetryFixture(t)
+		e.config.BindingUnboundChecks = 1
+		e.config.BindingCheckInterval = time.Nanosecond
+		if err := resources.TrackBindingChecks(a.Request.Unit, a.Request.ActionID, a.Plan, time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		client := fake.NewClientset(pod)
+		e.steps.Client = client
+		failure := errors.New("report temporarily unavailable")
+		e.Report = func(context.Context, staging.Feedback) error { return failure }
+		if err := e.checkBindings(context.Background()); !errors.Is(err, failure) {
+			t.Fatalf("没有执行回收后的反馈: %v", err)
+		}
+		if resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 || len(resources.BindingChecks()) != 1 {
+			t.Fatal("回报失败时没有保留待交付记录，或仍占用资源")
+		}
+		if lateBinding {
+			pod.Spec.NodeName = "node-a"
+			if err := resources.UpdatePod(pod); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var last staging.Feedback
+		e.Report = func(_ context.Context, f staging.Feedback) error { last = f; return nil }
+		if err := e.checkBindings(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		wantCPU, wantPhase := int64(0), staging.PhaseRecovered
+		if lateBinding {
+			wantCPU, wantPhase = 1000, staging.PhaseBound
+		}
+		if len(resources.BindingChecks()) != 0 || last.Phase != wantPhase || resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != wantCPU {
+			t.Fatalf("反馈重试覆盖了晚到绑定，或重复扣账: %+v", last)
+		}
+	}
+}
