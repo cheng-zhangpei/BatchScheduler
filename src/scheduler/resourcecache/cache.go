@@ -32,13 +32,20 @@ type Cache struct {
 	pods map[types.UID]*corev1.Pod
 	// Pod UID → 暂占明细。Forget 从这里找到所属执行、目标节点和需要撤销的 Pod。
 	assumed map[types.UID]Assumption
+
+	// 超时核查分两处存：仍保留暂占的留在 bindingChecks；释放后的移到有界 LRU。
+	// 当前只建立结构，后续再接入 Bind 超时、主动查询和释放流程。
+	bindingChecks  map[BindingCheckKey]BindingCheck
+	releasedChecks *bindingCheckHistory
 }
 
 // New 创建空资源账，由 informer 的初始事件填入节点和已有绑定。
 func New() *Cache {
 	return &Cache{
-		nodes:   make(map[string]*framework.NodeInfo),
-		pods:    make(map[types.UID]*corev1.Pod),
-		assumed: make(map[types.UID]Assumption),
+		nodes:          make(map[string]*framework.NodeInfo),
+		pods:           make(map[types.UID]*corev1.Pod),
+		assumed:        make(map[types.UID]Assumption),
+		bindingChecks:  make(map[BindingCheckKey]BindingCheck),
+		releasedChecks: newBindingCheckHistory(DefaultBindingCheckPolicy().ReleasedCapacity),
 	}
 }

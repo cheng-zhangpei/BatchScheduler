@@ -2,6 +2,7 @@
 package steps
 
 import (
+	"context"
 	"time"
 
 	"batchscheduler/src/scheduler/planner"
@@ -16,16 +17,18 @@ import (
 
 // Runner 持有步骤需要的数据读取器。Executor 直接调用它的方法。
 type Runner struct {
-	Groups      staging.GroupContextReader // 启动前接入 Buffer，查询同组其他轮次。
-	Planner     planner.Planner            // 默认接通信搜索并按其排序选定计划；其他语义的最终取舍待实现。
-	Client      kubernetes.Interface       // 真实 Bind 使用的客户端，在启动前设置。
-	BindTimeout time.Duration              // 一轮绑定最多等待多久。
-	views       workqueue.GroupViewReader
-	resources   *resourcecache.Cache // 与 informer 写入、后续 Assume 使用的是同一份资源账。
+	Groups             staging.GroupContextReader                          // 启动前接入 Buffer，查询同组其他轮次。
+	Planner            planner.Planner                                     // 默认接通信搜索并按其排序选定计划；其他语义的最终取舍待实现。
+	Client             kubernetes.Interface                                // 真实 Bind 使用的客户端，在启动前设置。
+	BindTimeout        time.Duration                                       // 一轮绑定最多等待多久。
+	BindRequestTimeout time.Duration                                       // 单次 Bind 请求的等待上限，仍受整轮 BindTimeout 限制。
+	HandleBindFailure  func(context.Context, *corev1.Binding, error) error // Executor 内部的错误处理入口。
+	views              workqueue.GroupViewReader
+	resources          *resourcecache.Cache // 与 informer 写入、后续 Assume 使用的是同一份资源账。
 }
 
 func NewRunner(views workqueue.GroupViewReader, resources *resourcecache.Cache) *Runner {
-	return &Runner{views: views, resources: resources, Planner: planner.Planner{Placement: communication.New()}, BindTimeout: 30 * time.Second}
+	return &Runner{views: views, resources: resources, Planner: planner.Planner{Placement: communication.New()}, BindTimeout: 30 * time.Second, BindRequestTimeout: 3 * time.Second}
 }
 
 // Attempt 是正在执行的这一轮，执行结束后不长期保存。
@@ -37,7 +40,7 @@ type Attempt struct {
 	AssumedMembers []workqueue.PodRef      // 本次 Assume 已成功记账的成员，Recover 只撤销这份名单。
 	Resources      *staging.ResourceResult // 部分暂占成功后的结果，由 Executor 通过 Report 交给 Buffer。
 	Binding        bool                    // 已发出绑定，但还没有确认全部结果。
-	BoundMembers   []workqueue.PodRef      // 本轮已经得到 API 成功响应的成员，失败恢复时不能当成未绑定。
+	BoundMembers   []workqueue.PodRef      // 本轮由 Bind 响应或主动查询确认已绑定的成员。
 
 	// Filter 保存本轮成员和节点视图，Score 直接复用，不再读取另一份缓存。
 	members    []*corev1.Pod

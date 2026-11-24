@@ -20,10 +20,14 @@ type BindingError struct {
 func (e *BindingError) Error() string { return e.Cause.Error() }
 func (e *BindingError) Unwrap() error { return e.Cause }
 
-// 这里只认明确的拒绝类型，不根据错误文字猜结果。
+// NewBindingError 将一次 API 错误分为明确拒绝和结果未知，不根据错误文字猜结果。
 // Conflict 也先算未知：Pod 可能已经被其他请求绑定，不能直接当成仍未绑定。
-// 网络错误、超时和 5xx 同样需要后续查 API 确认，不自动重发或 Forget。
-func newBindingError(binding *corev1.Binding, err error) *BindingError {
+// 网络错误、超时和 5xx 同样需要查询确认；是否补发由 Executor 的 Handler 决定。
+func NewBindingError(binding *corev1.Binding, err error) *BindingError {
+	var classified *BindingError
+	if errors.As(err, &classified) {
+		return classified
+	}
 	reason := workqueue.ReasonBindingUnknown
 	switch {
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):

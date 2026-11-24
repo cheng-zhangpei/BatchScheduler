@@ -26,13 +26,13 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 	}
 	r := b.records[feedback.Unit]
 	if r == nil {
-		return fmt.Errorf("反馈对应的执行记录不存在")
+		return fmt.Errorf("%w: 执行记录不存在", staging.ErrFeedbackObsolete)
 	}
 	if r.LastFeedback != nil && reflect.DeepEqual(*r.LastFeedback, feedback) {
 		return nil
 	}
 	if feedback.ActionID == "" || r.PendingAction != feedback.ActionID || r.PendingDecision != staging.ActionExecute || r.PendingOperation != feedback.Operation {
-		return fmt.Errorf("反馈不是当前这次执行的结果")
+		return fmt.Errorf("%w: 不是当前这次执行的结果", staging.ErrFeedbackObsolete)
 	}
 	// 所有检查通过后才修改 Record，错误反馈不能留下改了一半的数据。
 	if err := validateFeedback(r, feedback); err != nil {
@@ -47,6 +47,10 @@ func (b *Buffer) Report(ctx context.Context, feedback staging.Feedback) error {
 		r.Resources = feedback.Resources.DeepCopy()
 	}
 	r.ExecutionBlocked = feedback.Kind == staging.FeedbackBlocked
+	if confirmsUnknownBinding(r, feedback) {
+		// 后台核查已确认本轮绑定成功，取消先前“结果未知”的错误说明。
+		r.Failure = nil
+	}
 	updateReportedProgress(r, feedback)
 	switch feedback.Kind {
 	case staging.FeedbackProgress, staging.FeedbackUnknown:

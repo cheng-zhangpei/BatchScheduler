@@ -160,7 +160,10 @@ func TestBindingRejectionRecoversAndTransitionsToRetry(t *testing.T) {
 		return true, nil, apierrors.NewTooManyRequests("busy", 1)
 	})
 	config.Client = client
-	b, unit, executor, _, resources := executorFixture(t, config)
+	b, unit, executor, view, resources := executorFixture(t, config)
+	if err := client.Tracker().Add(view.Members[0].Pod.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
 	finished := make(chan staging.Feedback, 1)
 	executor.Report = func(ctx context.Context, f staging.Feedback) error {
 		if err := b.Report(ctx, f); err != nil {
@@ -214,6 +217,9 @@ func TestBindingUnknownReleasesAfterMatchingObservation(t *testing.T) {
 	})
 	config.Client = client
 	b, unit, executor, view, resources := executorFixture(t, config)
+	if err := client.Tracker().Add(view.Members[0].Pod.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
 	unknown := make(chan staging.Feedback, 1)
 	executor.Report = func(ctx context.Context, f staging.Feedback) error {
 		if err := b.Report(ctx, f); err != nil {
@@ -272,6 +278,71 @@ func TestBindingUnknownReleasesAfterMatchingObservation(t *testing.T) {
 	snapshot := resources.Snapshot()
 	if snapshot.Nodes["node-a"].GetRequested().GetMilliCPU() != 1000 || len(snapshot.BoundPods) != 1 {
 		t.Fatal("Release 清理了已确认绑定的占用或重复计账")
+	}
+}
+
+// 两成员整轮超时后，由 Executor 后台查询确认；Buffer 接住最终成功，再沿正常路径归档。
+func TestBackgroundChecksConfirmWholeGroupAndCloseBuffer(t *testing.T) {
+	config := execution.DefaultConfig()
+	config.BindRetry.MaxAttempts = 1
+	config.BindingCheckInterval = 10 * time.Millisecond
+	client := fake.NewClientset()
+	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return action.GetSubresource() == "binding", nil, context.DeadlineExceeded
+	})
+	config.Client = client
+	b, queues, executor, view, resources := queuedExecutorFixtureWithMembers(t, 2, config)
+	for _, member := range view.Members {
+		if err := client.Tracker().Add(member.Pod.DeepCopy()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknown, finished := make(chan staging.Feedback, 1), make(chan staging.Feedback, 1)
+	executor.Report = func(ctx context.Context, f staging.Feedback) error {
+		if err := b.Report(ctx, f); err != nil {
+			return err
+		}
+		if f.Kind == staging.FeedbackUnknown {
+			unknown <- f
+		} else if f.Kind == staging.FeedbackFinished {
+			finished <- f
+		}
+		return nil
+	}
+	ctx := context.Background()
+	unit := acceptQueuedUnit(t, ctx, queues, b)
+	if err := b.Apply(ctx, executionDecision(t, b, unit)); err != nil {
+		t.Fatal(err)
+	}
+	waitBindingFeedback(t, unknown)
+	for _, member := range view.Members {
+		bound := member.Pod.DeepCopy()
+		bound.Spec.NodeName = "node-a"
+		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), bound, bound.Namespace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := waitBindingFeedback(t, finished)
+	if f.Phase != staging.PhaseBound || f.Failure != nil || len(f.Plan) != 2 {
+		t.Fatalf("后台确认没有补报整组成功: %+v", f)
+	}
+	if snapshot := resources.Snapshot(); len(snapshot.BoundPods) != 2 || snapshot.Nodes["node-a"].GetRequested().GetMilliCPU() != 2000 {
+		t.Fatal("主动 GET 没有将整组暂占转换成实际占用")
+	}
+	// 模拟 informer 的组视图也接到绑定；最终 Release 仍需要这份当前资源视图。
+	for _, member := range view.Members {
+		member.Pod.Spec.NodeName = "node-a"
+	}
+	d := executionDecision(t, b, unit)
+	if d.Action != staging.ActionRelease {
+		t.Fatalf("Buffer 仍卡在未知结果: %+v", d)
+	}
+	if err := b.Apply(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	groupContext, err := b.GroupContext(ctx, unit.Key().Group)
+	if err != nil || len(groupContext.InFlight) != 0 || len(groupContext.Succeeded) != 1 {
+		t.Fatalf("整组未完成归档: %+v, %v", groupContext, err)
 	}
 }
 

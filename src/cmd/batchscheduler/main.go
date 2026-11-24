@@ -41,6 +41,11 @@ func run() error {
 	flag.IntVar(&executionConfig.MaxInFlight, "max-inflight", executionConfig.MaxInFlight, "调度及等待/正在绑定的最大轮数")
 	flag.IntVar(&executionConfig.BindWorkers, "bind-workers", executionConfig.BindWorkers, "后台绑定 worker 数量，不超过 max-inflight")
 	flag.DurationVar(&executionConfig.BindTimeout, "bind-timeout", executionConfig.BindTimeout, "一轮绑定的最长等待时间")
+	flag.DurationVar(&executionConfig.BindRetry.RequestTimeout, "bind-request-timeout", executionConfig.BindRetry.RequestTimeout, "单次 Bind 或确认查询的最长等待时间")
+	flag.IntVar(&executionConfig.BindRetry.MaxAttempts, "bind-max-attempts", executionConfig.BindRetry.MaxAttempts, "单成员绑定最多尝试次数，包含首次；查询失败也消耗一次机会")
+	flag.DurationVar(&executionConfig.BindRetry.InitialBackoff, "bind-retry-backoff", executionConfig.BindRetry.InitialBackoff, "绑定重试的初始退避间隔")
+	flag.DurationVar(&executionConfig.BindRetry.MaxBackoff, "bind-retry-max-backoff", executionConfig.BindRetry.MaxBackoff, "绑定重试的最大退避间隔")
+	flag.DurationVar(&executionConfig.BindingCheckInterval, "bind-check-interval", executionConfig.BindingCheckInterval, "未知绑定结果的后台核查间隔")
 	flag.Parse()
 	if err := executionConfig.Validate(); err != nil {
 		return err

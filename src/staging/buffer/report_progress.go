@@ -12,7 +12,7 @@ import (
 // validateFeedback 检查报告的含义与顺序，不要求 Buffer 批准执行器的下一步。
 func validateFeedback(r *staging.Record, f staging.Feedback) error {
 	rank := phaseOrder(f.Phase)
-	if rank == 0 || rank < phaseOrder(r.ExecutionPhase) {
+	if rank == 0 || (rank < phaseOrder(r.ExecutionPhase) && !confirmsUnknownBinding(r, f)) {
 		return fmt.Errorf("执行进度未知或倒退: %s → %s", r.ExecutionPhase, f.Phase)
 	}
 	switch f.Kind {
@@ -73,6 +73,15 @@ func validateFeedback(r *staging.Record, f staging.Feedback) error {
 		return fmt.Errorf("预占后不能用另一份计划覆盖原计划")
 	}
 	return nil
+}
+
+// confirmsUnknownBinding 允许同一次 Run 在“等待确认”之后补报绑定成功。
+// Recovering 在这里表示之前没收到 Bind 结果；不是先回滚了再返回 Bound。
+func confirmsUnknownBinding(r *staging.Record, f staging.Feedback) bool {
+	previous := r.LastFeedback
+	return f.Operation == staging.OperationRun && f.Kind == staging.FeedbackFinished && f.Phase == staging.PhaseBound &&
+		f.ResponsibilitiesSettled && f.Failure == nil && previous != nil && previous.ActionID == f.ActionID &&
+		previous.Kind == staging.FeedbackUnknown && previous.Failure != nil && previous.Failure.Reason == workqueue.ReasonBindingUnknown
 }
 
 // updateReportedProgress 记录执行器已经做到哪，不负责做预占、绑定或资源清理。

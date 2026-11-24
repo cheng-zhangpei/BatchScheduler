@@ -12,6 +12,7 @@ var (
 	ErrStaleDecision      = errors.New("评估决策已过期，需重新评估")
 	ErrHandlerUnavailable = errors.New("动作适配器尚未接入")
 	ErrHandoffUnknown     = errors.New("交接结果未知，须确认后再释放")
+	ErrFeedbackObsolete   = errors.New("反馈对应的执行已经结束或被替换")
 	// ErrExecutionNotStarted 表示执行器确认没有预占或绑定操作在途，可以取消本次 Pending。
 	// 用于请求未被接收；已接收后的进度、失败、待实现步骤通过 Report 返回。
 	ErrExecutionNotStarted = errors.New("尚未开始资源操作")

@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"time"
 
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/staging"
@@ -33,7 +34,11 @@ func (e *Executor) reportRecoveryResult(ctx context.Context, a *executionAttempt
 		return e.report(ctx, a, staging.FeedbackFinished, staging.PhaseRecovered, "", true)
 	case errors.Is(recoveryErr, steps.ErrBindingResultUnknown):
 		// Bind 可能已经成功，不能提前 Forget 或回送；Buffer 保留 Pending 等待确认。
-		return e.report(ctx, a, staging.FeedbackUnknown, staging.PhaseRecovering, recoveryErr.Error(), false)
+		if err := e.report(ctx, a, staging.FeedbackUnknown, staging.PhaseRecovering, recoveryErr.Error(), false); err != nil {
+			return err
+		}
+		// 只登记实际 Assume 的计划；后续核查由独立循环接手，绑定 Worker 可以结束。
+		return e.resources.TrackBindingChecks(a.Request.Unit, a.Request.ActionID, a.Plan, time.Now())
 	case errors.Is(recoveryErr, staging.ErrHandlerUnavailable):
 		// 例如已有成员绑定，但对应恢复尚未实现。报告阻塞，保留 Record 和资源责任。
 		return e.report(ctx, a, staging.FeedbackBlocked, staging.PhaseRecovering, recoveryErr.Error(), false)

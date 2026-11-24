@@ -43,6 +43,11 @@ func (c *Cache) UpdatePod(pod *corev1.Pod) error {
 	copy := pod.DeepCopy()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.updatePod(copy)
+}
+
+// updatePod 把真实绑定写入账，供 informer 和主动核查共用。调用方已持有资源锁。
+func (c *Cache) updatePod(copy *corev1.Pod) error {
 	if err := c.removePod(copy.UID); err != nil {
 		return err
 	}

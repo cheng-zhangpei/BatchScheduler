@@ -13,6 +13,8 @@ func (e *Executor) runBinding(ctx context.Context, a *executionAttempt) error {
 		return err
 	}
 	if err := e.steps.Bind(ctx, &a.Attempt); err != nil {
+		// TODO：Atomic 的已绑定成员回滚、Partial 的失败成员单独回送，在 Recover 中实现。
+		// 目前已有成员绑定成功时，Recover 仍报告阻塞，不假装已完成回滚。
 		return e.handleExecutionError(ctx, a, err)
 	}
 	a.Binding, a.Reserved = false, false

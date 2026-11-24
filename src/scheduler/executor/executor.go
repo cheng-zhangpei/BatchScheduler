@@ -16,6 +16,8 @@ import (
 // Executor 自己组织整条执行线。外部只提供数据读取器和唯一的 Report 回报通道。
 type Executor struct {
 	steps            *steps.Runner
+	bindFailures     *bindFailHandler
+	resources        *resourcecache.Cache
 	config           Config
 	Report           func(context.Context, staging.Feedback) error
 	mu               sync.Mutex
@@ -32,7 +34,10 @@ type executionKey struct {
 func NewExecutor(views workqueue.GroupViewReader, resources *resourcecache.Cache, config Config) *Executor {
 	runner := steps.NewRunner(views, resources)
 	runner.Client, runner.BindTimeout = config.Client, config.BindTimeout
-	return &Executor{steps: runner, config: config, requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
+	runner.BindRequestTimeout = config.BindRetry.RequestTimeout
+	handler := &bindFailHandler{runner: runner, policy: config.BindRetry}
+	runner.HandleBindFailure = handler.Handle
+	return &Executor{steps: runner, bindFailures: handler, resources: resources, config: config, requests: make(chan staging.Execution, 64), accepted: make(map[executionKey]bool)}
 }
 
 // SetGroupContextReader 在启动前接入 Buffer，让组规划能查到同组其他轮次与成功历史。
@@ -89,6 +94,12 @@ func (e *Executor) Run(ctx context.Context) error {
 	e.started = true
 	e.mu.Unlock()
 	inflight := newInflight(e.config)
+	checkCtx, stopChecks := context.WithCancel(ctx)
+	checksDone := make(chan struct{})
+	go func() {
+		defer close(checksDone)
+		e.runBindingChecks(checkCtx)
+	}()
 	// 这里其实就是启动worker去定期的从task里面拿数据了
 	inflight.start(ctx, e)
 	defer func() {
@@ -97,6 +108,8 @@ func (e *Executor) Run(ctx context.Context) error {
 		e.mu.Unlock()
 		// 停止接单后，等已启动的绑定协程退出，main 才能关闭 Buffer 使用的数据库。
 		inflight.closeAndWait()
+		stopChecks()
+		<-checksDone
 	}()
 	//
 	for {

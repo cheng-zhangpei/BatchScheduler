@@ -12,7 +12,8 @@ import (
 
 // Bind 在 Inflight 的 worker 中运行，按 Plan 逐个提交 Pod 的 binding 子资源。
 // API 返回成功表示已经完成节点分配，不等容器启动；真实资源信息随后由 informer 接回。
-// 一轮内顺序提交，遇到第一个错误就停。各轮之间的并发由 Inflight 管理。
+// 一轮内顺序提交。错误交给 Executor 的 Handler；它确认成功后继续下一个成员，
+// 否则结束本轮绑定，交给原来的 Recover/Report。各轮之间的并发由 Inflight 管理。
 func (r *Runner) Bind(ctx context.Context, a *Attempt) error {
 	if r.Client == nil {
 		return fmt.Errorf("%w: %w: Bind 缺少 Kubernetes 客户端", staging.ErrExecutionNotStarted, staging.ErrHandlerUnavailable)
@@ -28,9 +29,12 @@ func (r *Runner) Bind(ctx context.Context, a *Attempt) error {
 	defer cancel()
 	for _, binding := range bindings {
 		a.Binding = true
-		err := r.Client.CoreV1().Pods(binding.Namespace).Bind(ctx, binding, metav1.CreateOptions{})
+		err := r.BindPod(ctx, binding)
+		if err != nil && r.HandleBindFailure != nil {
+			err = r.HandleBindFailure(ctx, binding, err)
+		}
 		if err != nil {
-			failure := newBindingError(binding, err)
+			failure := NewBindingError(binding, err)
 			// 明确拒绝说明本次请求没有绑定成功；超时等不明确的结果保留标记，交给 Recover。
 			a.Binding = failure.Reason == workqueue.ReasonBindingUnknown
 			return failure
@@ -39,6 +43,14 @@ func (r *Runner) Bind(ctx context.Context, a *Attempt) error {
 		a.BoundMembers = append(a.BoundMembers, workqueue.PodRef{Name: binding.Name, UID: binding.UID})
 	}
 	return nil
+}
+
+// BindPod 只发送一次请求。初次绑定和 Handler 补发都经过这里，使用相同的短超时。
+// ctx 同时带着整轮期限，所以重试不会重新获得一轮 30 秒。
+func (r *Runner) BindPod(ctx context.Context, binding *corev1.Binding) error {
+	requestCtx, cancel := context.WithTimeout(ctx, r.BindRequestTimeout)
+	defer cancel()
+	return r.Client.CoreV1().Pods(binding.Namespace).Bind(requestCtx, binding, metav1.CreateOptions{})
 }
 
 // bindingRequests 先把整轮请求组装好，再发网络请求；每个请求都带原 Pod UID。
