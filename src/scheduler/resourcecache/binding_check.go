@@ -17,40 +17,34 @@ type BindingCheckKey struct {
 type BindingCheckState string
 
 const (
-	// BindingCheckPending：绑定已超时，仍保留暂占，等待主动查询结果。
+	// BindingCheckPending：绑定尚未确认，在原预算内保留暂占，等待成功确认或到期。
 	BindingCheckPending BindingCheckState = "Pending"
-	// BindingCheckReleased：已按核查策略释放暂占，保留记录以识别晚到结果。
+	// BindingCheckReleased：预算到期已释放暂占，保留记录以识别晚到结果。
 	// 这不表示服务端确认绑定失败。
 	BindingCheckReleased BindingCheckState = "Released"
 	// BindingCheckGone：原 UID 已删除或被替换，不再等待旧绑定。
 	BindingCheckGone BindingCheckState = "Gone"
 )
 
-// BindingCheck 只记录核查进度，不保存完整 Pod，也不代替 assumed 中的资源明细。
-// 后续查询必须核对 Key 中的 Pod UID；查询失败不能增加 UnboundChecks。
+// BindingCheck 保存原计划和唯一的绑定截止时间，不保存完整 Pod 或观测次数。
 type BindingCheck struct {
-	Key           BindingCheckKey
-	NodeName      string // 原计划节点；核查和补发都沿用它。
-	State         BindingCheckState
-	TimedOutAt    time.Time // 重试因次数或总期限耗尽，转入后台核查的时间。
-	LastCheckedAt time.Time // 最近一次成功查询原 Pod 状态的时间。
-	UnboundChecks int       // 连续确认原 UID 仍未绑定的次数。
-	ReleasedAt    time.Time // 实际撤销暂占后才填写。
+	Key        BindingCheckKey
+	NodeName   string // 原计划节点；核查和补发都沿用它。
+	State      BindingCheckState
+	Deadline   time.Time // 从首次 Bind 开始计算；转后台、回报重试都沿用它。
+	ReleasedAt time.Time // 实际撤销暂占后才填写。
 }
 
-// BindingCheckPolicy 定义核查间隔、回收阈值和历史容量。
-// 达到次数后才考虑释放；每次有效核查之间至少间隔 CheckInterval。
+// BindingCheckPolicy 只定义截止时间检查频率和历史容量，不增加第二段回收门槛。
 type BindingCheckPolicy struct {
-	RequiredUnboundChecks int
-	CheckInterval         time.Duration
-	ReleasedCapacity      int // 仅限制已释放记录的 LRU，不淘汰仍有暂占的记录。
+	CheckInterval    time.Duration
+	ReleasedCapacity int // 仅限制已释放记录的 LRU，不淘汰仍有暂占的记录。
 }
 
-// DefaultBindingCheckPolicy 给后续接线提供初始值，不改变现有 30 秒绑定超时。
+// DefaultBindingCheckPolicy 提供默认截止时间检查频率和历史容量。
 func DefaultBindingCheckPolicy() BindingCheckPolicy {
 	return BindingCheckPolicy{
-		RequiredUnboundChecks: 5,
-		CheckInterval:         time.Second,
-		ReleasedCapacity:      1024,
+		CheckInterval:    time.Second,
+		ReleasedCapacity: 1024,
 	}
 }

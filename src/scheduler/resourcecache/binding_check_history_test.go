@@ -35,10 +35,10 @@ func TestBindingCheckHistoryEvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatal("历史超过容量，或索引和 LRU 链表数量不一致")
 	}
 	// 同一执行更新记录时不增加容量；取出的副本也不能修改内部记录。
-	a.UnboundChecks = 5
+	a.ReleasedAt = time.Unix(123, 0)
 	history.remember(a)
 	got, ok := history.find(a.Key)
-	if !ok || got.UnboundChecks != 5 || len(history.entries) != 2 {
+	if !ok || !got.ReleasedAt.Equal(a.ReleasedAt) || len(history.entries) != 2 {
 		t.Fatal("更新旧执行没有替换原记录")
 	}
 	got.NodeName = "changed"

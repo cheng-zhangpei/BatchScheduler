@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/scheduler/steps"
 	"batchscheduler/src/staging"
 )
@@ -33,12 +34,26 @@ func (e *Executor) reportRecoveryResult(ctx context.Context, a *executionAttempt
 		a.Reserved, a.Binding = false, false
 		return e.report(ctx, a, staging.FeedbackFinished, staging.PhaseRecovered, "", true)
 	case errors.Is(recoveryErr, steps.ErrBindingResultUnknown):
-		// Bind 可能已经成功，不能提前 Forget 或回送；Buffer 保留 Pending 等待确认。
+		// 已收到成功响应的成员先转为真实占用；到期只释放其余暂占。
+		if err := e.resources.ConfirmBoundMembers(a.Request.Unit, a.Request.ActionID, a.BoundMembers); err != nil {
+			return err
+		}
 		if err := e.report(ctx, a, staging.FeedbackUnknown, staging.PhaseRecovering, recoveryErr.Error(), false); err != nil {
 			return err
 		}
-		// 只登记实际 Assume 的计划；后续核查由独立循环接手，绑定 Worker 可以结束。
-		return e.resources.TrackBindingChecks(a.Request.Unit, a.Request.ActionID, a.Plan, time.Now())
+		if err := e.resources.TrackBindingChecks(a.Request.Unit, a.Request.ActionID, a.Plan, a.BindingDeadline); err != nil {
+			return err
+		}
+		if !time.Now().Before(a.BindingDeadline) {
+			// 预算已用完就立即退账，不再增加一轮 GET 或等待后台计时。
+			checks := make([]resourcecache.BindingCheck, 0, len(a.Plan))
+			for ref, node := range a.Plan {
+				checks = append(checks, resourcecache.BindingCheck{Key: resourcecache.BindingCheckKey{
+					Unit: a.Request.Unit, ActionID: a.Request.ActionID, Pod: ref}, NodeName: node, Deadline: a.BindingDeadline})
+			}
+			return e.checkBindingAttempt(ctx, checks)
+		}
+		return nil // 次数先耗尽时，只等待 informer 确认或原预算到期，不再额外发 GET。
 	case errors.Is(recoveryErr, staging.ErrHandlerUnavailable):
 		// 例如已有成员绑定，但对应恢复尚未实现。报告阻塞，保留 Record 和资源责任。
 		return e.report(ctx, a, staging.FeedbackBlocked, staging.PhaseRecovering, recoveryErr.Error(), false)

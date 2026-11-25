@@ -9,19 +9,8 @@ import (
 
 func TestBindingReclaimForgetsOnceAndObservesLateBinding(t *testing.T) {
 	c, batch, keys, start := reclaimFixture(t)
-	policy := DefaultBindingCheckPolicy()
-	policy.RequiredUnboundChecks = 2
-	for _, key := range keys {
-		unbound := c.assumed[key.Pod.UID].Pod.DeepCopy()
-		unbound.Spec.NodeName = ""
-		for second := 1; second <= 2; second++ {
-			if _, err := c.ObserveBindingCheck(key, unbound, start.Add(time.Duration(second)*time.Second), time.Second); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	for range 2 {
-		result, err := c.ReclaimBindingChecks(keys, policy, start.Add(3*time.Second))
+		result, err := c.ReclaimBindingChecks(keys, start.Add(30*time.Second))
 		if err != nil || !result.Ready || len(result.Released) != 2 || len(result.Bound) != 0 {
 			t.Fatalf("回收结果不正确: %+v, %v", result, err)
 		}
@@ -64,22 +53,13 @@ func TestBindingReclaimForgetsOnceAndObservesLateBinding(t *testing.T) {
 	}
 }
 
-func TestBindingReclaimRechecksInformerConfirmation(t *testing.T) {
+func TestBindingReclaimPreservesAcknowledgedBindingsWithoutInformer(t *testing.T) {
 	c, batch, keys, start := reclaimFixture(t)
-	policy := DefaultBindingCheckPolicy()
-	policy.RequiredUnboundChecks = 1
-	for _, key := range keys {
-		unbound := c.assumed[key.Pod.UID].Pod.DeepCopy()
-		unbound.Spec.NodeName = ""
-		if _, err := c.ObserveBindingCheck(key, unbound, start.Add(time.Second), time.Second); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// GET 曾认为两个成员都没绑定，但在真正扣账前 informer 确认了 B。
-	if err := c.UpdatePod(batch[1].Pod); err != nil {
+	// B 已收到 Bind 成功响应，但 informer 尚未回来，仍必须保留它的真实占用。
+	if err := c.ConfirmBoundMembers(batch[1].Unit, batch[1].ActionID, []workqueue.PodRef{keys[1].Pod}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := c.ReclaimBindingChecks(keys, policy, start.Add(2*time.Second))
+	result, err := c.ReclaimBindingChecks(keys, start.Add(30*time.Second))
 	if err != nil || !result.Ready || len(result.Bound) != 1 || result.Bound[0] != keys[1].Pod || len(result.Released) != 1 {
 		t.Fatalf("忽略了回收前到达的确认: %+v, %v", result, err)
 	}
@@ -88,25 +68,14 @@ func TestBindingReclaimRechecksInformerConfirmation(t *testing.T) {
 	}
 }
 
-func TestBindingReclaimWaitsForWholeAttemptAndBoundsHistory(t *testing.T) {
+func TestBindingReclaimWaitsForDeadlineAndBoundsHistory(t *testing.T) {
 	c, _, keys, start := reclaimFixture(t)
-	policy := DefaultBindingCheckPolicy()
-	policy.RequiredUnboundChecks = 1
-	for i, key := range keys {
-		unbound := c.assumed[key.Pod.UID].Pod.DeepCopy()
-		unbound.Spec.NodeName = ""
-		if _, err := c.ObserveBindingCheck(key, unbound, start.Add(time.Second), time.Second); err != nil {
-			t.Fatal(err)
-		}
-		if i == 0 {
-			result, err := c.ReclaimBindingChecks(keys, policy, start.Add(time.Second))
-			if err != nil || result.Ready || len(c.assumed) != 2 || !c.releasedChecks.empty() {
-				t.Fatal("另一成员未完成核查时提前修改了资源")
-			}
-		}
+	result, err := c.ReclaimBindingChecks(keys, start.Add(29*time.Second))
+	if err != nil || result.Ready || len(c.assumed) != 2 || !c.releasedChecks.empty() {
+		t.Fatal("预算未到期就修改了资源")
 	}
 	c.SetBindingHistoryCapacity(1)
-	if _, err := c.ReclaimBindingChecks(keys, policy, start.Add(2*time.Second)); err != nil {
+	if _, err := c.ReclaimBindingChecks(keys, start.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if len(c.releasedChecks.entries) != 1 || len(c.releasedChecks.byPod) != 1 {
@@ -134,7 +103,7 @@ func reclaimFixture(t *testing.T) (*Cache, []Assumption, []BindingCheckKey, time
 		keys = append(keys, BindingCheckKey{Unit: a.Unit, ActionID: a.ActionID, Pod: ref})
 	}
 	start := time.Unix(100, 0)
-	if err := c.TrackBindingChecks(batch[0].Unit, batch[0].ActionID, plan, start); err != nil {
+	if err := c.TrackBindingChecks(batch[0].Unit, batch[0].ActionID, plan, start.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return c, batch, keys, start

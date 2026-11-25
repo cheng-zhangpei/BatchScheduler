@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
@@ -25,7 +26,10 @@ func (r *Runner) Bind(ctx context.Context, a *Attempt) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("%w: %w", staging.ErrExecutionNotStarted, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, r.BindTimeout)
+	if a.BindingDeadline.IsZero() {
+		a.BindingDeadline = time.Now().Add(r.BindTimeout)
+	}
+	ctx, cancel := context.WithDeadline(ctx, a.BindingDeadline)
 	defer cancel()
 	for _, binding := range bindings {
 		a.Binding = true

@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"testing"
+	"time"
 
 	"batchscheduler/src/group"
 	"batchscheduler/src/scheduler/resourcecache"
@@ -39,8 +40,9 @@ func TestRecoveryReportsResourceOutcomeAndOriginalFailure(t *testing.T) {
 			unit := workqueue.UnitKey{Group: group.Key{Namespace: "work", Name: "job", UID: "group"}, ID: "unit"}
 			ref := workqueue.PodRef{Name: "pod", UID: "pod"}
 			a := &executionAttempt{Attempt: steps.Attempt{
-				Request: staging.Execution{Unit: unit, ActionID: "action", Operation: staging.OperationRun, Members: []workqueue.PodRef{ref}},
-				Plan:    map[workqueue.PodRef]string{ref: "node"}, Reserved: tc.assumed, Binding: tc.binding,
+				BindingDeadline: time.Now().Add(30 * time.Second),
+				Request:         staging.Execution{Unit: unit, ActionID: "action", Operation: staging.OperationRun, Members: []workqueue.PodRef{ref}},
+				Plan:            map[workqueue.PodRef]string{ref: "node"}, Reserved: tc.assumed, Binding: tc.binding,
 			}, failure: &group.FailureInfo{Reason: workqueue.ReasonUnschedulable, Message: "原始失败原因"}}
 			if tc.assumed {
 				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "work", Name: ref.Name, UID: ref.UID}, Spec: corev1.PodSpec{

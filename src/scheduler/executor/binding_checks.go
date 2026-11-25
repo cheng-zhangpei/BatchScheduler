@@ -10,12 +10,10 @@ import (
 	"batchscheduler/src/scheduler/resourcecache"
 	"batchscheduler/src/staging"
 	"batchscheduler/src/workqueue"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// runBindingChecks 使用一个独立循环核查未知结果，不继续占用绑定 Worker 的名额。
-// 取消 Context 后停止计时、取消正在发出的 GET，由 Executor.Run 等它退出。
+// runBindingChecks 只检查原截止时间和缓存中的真实绑定，不再增加一轮 GET。
+// 取消 Context 后停止计时，由 Executor.Run 等它退出。
 func (e *Executor) runBindingChecks(ctx context.Context) {
 	if e.resources == nil {
 		return
@@ -53,42 +51,18 @@ func (e *Executor) checkBindings(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-// checkBindingAttempt 只发 GET，不再补发 Bind。
-// 查到绑定就更新真实占用；未绑定就记一次有效核查；全部确认后仍走唯一的 Report 入口。
+// checkBindingAttempt 原预算内接住 informer 确认，到期直接回收；不再发 GET 或 Bind。
 func (e *Executor) checkBindingAttempt(ctx context.Context, checks []resourcecache.BindingCheck) error {
 	plan := make(map[workqueue.PodRef]string, len(checks))
 	keys := make([]resourcecache.BindingCheckKey, 0, len(checks))
-	var failures []error
 	for _, check := range checks {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		keys = append(keys, check.Key)
 		plan[check.Key.Pod] = check.NodeName
-		if check.State == resourcecache.BindingCheckReleased || check.State == resourcecache.BindingCheckGone {
-			continue // 资源已经处理，只需重试把结果交给 Buffer。
-		}
-		queryCtx, cancel := context.WithTimeout(ctx, e.config.BindRetry.RequestTimeout)
-		pod, err := e.steps.Client.CoreV1().Pods(check.Key.Unit.Group.Namespace).Get(queryCtx, check.Key.Pod.Name, metav1.GetOptions{})
-		cancel()
-		if apierrors.IsNotFound(err) || (err == nil && pod.UID != check.Key.Pod.UID) {
-			e.resources.MarkBindingCheckGone(check.Key)
-			continue
-		}
-		if err != nil {
-			failures = append(failures, err) // 查询失败或 NotFound 都不计作“原 Pod 仍未绑定”。
-			continue
-		}
-		_, err = e.resources.ObserveBindingCheck(check.Key, pod, time.Now(), e.config.BindingCheckInterval)
-		if err != nil {
-			failures = append(failures, err)
-		}
 	}
-	if len(failures) != 0 {
-		return errors.Join(failures...)
-	}
-	policy := resourcecache.BindingCheckPolicy{RequiredUnboundChecks: e.config.BindingUnboundChecks}
-	result, err := e.resources.ReclaimBindingChecks(keys, policy, time.Now())
+	result, err := e.resources.ReclaimBindingChecks(keys, time.Now())
 	if err != nil || !result.Ready {
 		return err
 	}

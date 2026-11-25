@@ -27,8 +27,8 @@ func TestBindingReclamationReturnsAndRetriesThroughRealQueues(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				config := execution.DefaultConfig()
 				config.BindRetry.MaxAttempts = 1
+				config.BindTimeout = 100 * time.Millisecond
 				config.BindingCheckInterval = 10 * time.Millisecond
-				config.BindingUnboundChecks = 2
 				client := fake.NewClientset()
 				config.Client = client
 				b, queues, executor, view, resources := queuedExecutorFixtureWithMode(t, 2, mode, config)
@@ -76,7 +76,7 @@ func TestBindingReclamationReturnsAndRetriesThroughRealQueues(t *testing.T) {
 				}
 				waitBindingFeedback(t, unknown)
 				if mixed {
-					// 模拟 informer 的组视图接住已成功的 A；资源账由主动查询更新。
+					// 模拟 informer 的组视图接住已成功的 A；资源账已经接到 Bind 成功回执。
 					view.Members[0].Pod.Spec.NodeName = "node-a"
 				}
 				f := waitBindingFeedback(t, finished)

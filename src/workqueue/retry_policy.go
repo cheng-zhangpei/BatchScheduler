@@ -23,7 +23,7 @@ const (
 	// ReasonBindingRejected 已确认可重试的临时绑定拒绝，且成员仍未绑定并完成清理。
 	// 权限/无效请求须归入下方对应分类；请求超时不能直接归为此类。
 	ReasonBindingRejected = "BindingRejected"
-	// ReasonBindingConfirmationExpired 经多次有效核查仍未绑定，已按约定策略释放暂占。
+	// ReasonBindingConfirmationExpired 整轮绑定预算到期仍未确认，已按约定策略释放暂占。
 	// 允许退避后再调度；它不表示服务端证明旧请求失败。
 	ReasonBindingConfirmationExpired = "BindingConfirmationExpired"
 )

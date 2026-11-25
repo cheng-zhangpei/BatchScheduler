@@ -57,7 +57,6 @@ func TestExecutorRejectsInvalidInflightConfig(t *testing.T) {
 		func(c *Config) { c.BindWorkers = c.MaxInFlight + 1 },
 		func(c *Config) { c.BindTimeout = 0 },
 		func(c *Config) { c.BindingCheckInterval = 0 },
-		func(c *Config) { c.BindingUnboundChecks = 0 },
 		func(c *Config) { c.BindingHistoryCapacity = -1 },
 		func(c *Config) { c.BindRetry.MaxAttempts = 0 },
 		func(c *Config) { c.BindRetry.RequestTimeout = 0 },

@@ -281,7 +281,7 @@ func TestBindingUnknownReleasesAfterMatchingObservation(t *testing.T) {
 	}
 }
 
-// 两成员整轮超时后，由 Executor 后台查询确认；Buffer 接住最终成功，再沿正常路径归档。
+// 两成员重试结束后，由 informer 确认资源；Buffer 接住最终成功，再沿正常路径归档。
 func TestBackgroundChecksConfirmWholeGroupAndCloseBuffer(t *testing.T) {
 	config := execution.DefaultConfig()
 	config.BindRetry.MaxAttempts = 1
@@ -318,7 +318,7 @@ func TestBackgroundChecksConfirmWholeGroupAndCloseBuffer(t *testing.T) {
 	for _, member := range view.Members {
 		bound := member.Pod.DeepCopy()
 		bound.Spec.NodeName = "node-a"
-		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), bound, bound.Namespace); err != nil {
+		if err := resources.UpdatePod(bound); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -327,7 +327,7 @@ func TestBackgroundChecksConfirmWholeGroupAndCloseBuffer(t *testing.T) {
 		t.Fatalf("后台确认没有补报整组成功: %+v", f)
 	}
 	if snapshot := resources.Snapshot(); len(snapshot.BoundPods) != 2 || snapshot.Nodes["node-a"].GetRequested().GetMilliCPU() != 2000 {
-		t.Fatal("主动 GET 没有将整组暂占转换成实际占用")
+		t.Fatal("Informer 确认没有将整组暂占转换成实际占用")
 	}
 	// 模拟 informer 的组视图也接到绑定；最终 Release 仍需要这份当前资源视图。
 	for _, member := range view.Members {

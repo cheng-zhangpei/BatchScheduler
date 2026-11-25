@@ -18,8 +18,8 @@ type BindingReclamation struct {
 }
 
 // ReclaimBindingChecks 在一把资源锁内复核整轮、Forget 未绑定成员、保存历史。
-// Informer 若已确认绑定，成员转入 Bound，不再按先前的未绑定计数扣账。
-func (c *Cache) ReclaimBindingChecks(keys []BindingCheckKey, policy BindingCheckPolicy, now time.Time) (BindingReclamation, error) {
+// 原截止时间到了就回收，不等额外 GET；已经确认的真实绑定仍转入 Bound。
+func (c *Cache) ReclaimBindingChecks(keys []BindingCheckKey, now time.Time) (BindingReclamation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(keys) == 0 {
@@ -48,7 +48,7 @@ func (c *Cache) ReclaimBindingChecks(keys []BindingCheckKey, policy BindingCheck
 			result.Released = append(result.Released, key.Pod)
 			continue
 		}
-		if check.State != BindingCheckGone && (!assumed || !check.ReadyToRelease(policy)) {
+		if check.State != BindingCheckGone && !check.ReadyToRelease(now) {
 			return BindingReclamation{}, nil
 		}
 		if assumed {
@@ -80,17 +80,4 @@ func (c *Cache) ReclaimBindingChecks(keys []BindingCheckKey, policy BindingCheck
 		return result.Released[i].Name < result.Released[j].Name
 	})
 	return result, nil
-}
-
-// MarkBindingCheckGone 记录 GET 已确认原 UID 消失，不把 NotFound 当成一次未绑定计数。
-func (c *Cache) MarkBindingCheckGone(key BindingCheckKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if check, exists := c.bindingChecks[key]; exists {
-		check.State = BindingCheckGone
-		c.bindingChecks[key] = check
-		if !c.releasedChecks.empty() {
-			c.releasedChecks.remove(key)
-		}
-	}
 }

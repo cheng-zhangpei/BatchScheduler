@@ -145,11 +145,11 @@ func TestBindRetryHonorsRequestAndRoundDeadlines(t *testing.T) {
 		t.Fatalf("重试刷新了整轮预算: %s", elapsed)
 	}
 	// 期限优先于次数；预算很短或机器忙时，允许第一轮之后就结束，不能强求发满。
-	if posts.Load() < 1 || posts.Load() > 5 || last.Kind != staging.FeedbackUnknown || last.ResponsibilitiesSettled {
+	if posts.Load() < 1 || posts.Load() > 5 || last.Kind != staging.FeedbackFinished || last.Phase != staging.PhaseRecovered || !last.ResponsibilitiesSettled {
 		t.Fatalf("超时处理不符: posts=%d, feedback=%+v", posts.Load(), last)
 	}
-	if resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 1000 {
-		t.Fatal("总预算耗尽后擅自释放未知暂占")
+	if resources.Snapshot().Nodes["node-a"].GetRequested().GetMilliCPU() != 0 {
+		t.Fatal("总预算耗尽后仍保留未知暂占")
 	}
 }
 
